@@ -85,7 +85,7 @@ def get_sentence_info(
         sentence = sentence.strip()
         if not sentence:
             continue
-        tokens = process_text_chunk(sentence)
+        tokens = process_text_chunk(sentence, language=lang_code)
         yield sentence, tokens, len(tokens)
 
 
@@ -187,7 +187,9 @@ def join_lines(text: str) -> str:
     return " ".join(paragraphs)
 
 
-def split_words(text: str, max_tokens: int) -> List[Tuple[str, List[int]]]:
+def split_words(
+    text: str, max_tokens: int, lang_code: str = "a"
+) -> List[Tuple[str, List[int]]]:
     """Cut a run of words into pieces that each fit in max_tokens."""
     words = []
     for index, segment in enumerate(CUSTOM_PHONEMES.split(text)):
@@ -197,17 +199,46 @@ def split_words(text: str, max_tokens: int) -> List[Tuple[str, List[int]]]:
         low, high = 1, len(words)
         while low < high:
             mid = (low + high + 1) // 2
-            if len(process_text_chunk(" ".join(words[:mid]))) <= max_tokens:
+            if (
+                len(process_text_chunk(" ".join(words[:mid]), language=lang_code))
+                <= max_tokens
+            ):
                 low = mid
             else:
                 high = mid - 1
         piece = " ".join(words[:low])
-        pieces.append((piece, process_text_chunk(piece)))
+        tokens = process_text_chunk(piece, language=lang_code)
+        if len(tokens) > max_tokens and not CUSTOM_PHONEMES.fullmatch(piece):
+            graphemes = regex.findall(r"\X", piece)
+            while graphemes:
+                left, right = 1, len(graphemes)
+                while left < right:
+                    middle = (left + right + 1) // 2
+                    if (
+                        len(
+                            process_text_chunk(
+                                "".join(graphemes[:middle]), language=lang_code
+                            )
+                        )
+                        <= max_tokens
+                    ):
+                        left = middle
+                    else:
+                        right = middle - 1
+                fragment = "".join(graphemes[:left])
+                pieces.append(
+                    (fragment, process_text_chunk(fragment, language=lang_code))
+                )
+                graphemes = graphemes[left:]
+        else:
+            pieces.append((piece, tokens))
         words = words[low:]
     return pieces
 
 
-def split_clauses(sentence: str, max_tokens: int) -> Iterator[Tuple[str, List[int]]]:
+def split_clauses(
+    sentence: str, max_tokens: int, lang_code: str = "a"
+) -> Iterator[Tuple[str, List[int]]]:
     """Cut an oversized sentence at clause punctuation, then by words where a clause still does not fit."""
     clauses = re.split(r"([,;:，、；：])", sentence)
     for index in range(0, len(clauses), 2):
@@ -216,11 +247,11 @@ def split_clauses(sentence: str, max_tokens: int) -> Iterator[Tuple[str, List[in
             continue
         if index + 1 < len(clauses):
             clause += clauses[index + 1]
-        tokens = process_text_chunk(clause)
+        tokens = process_text_chunk(clause, language=lang_code)
         if len(tokens) <= max_tokens:
             yield clause, tokens
         else:
-            yield from split_words(clause, max_tokens)
+            yield from split_words(clause, max_tokens, lang_code)
 
 
 def pack(
@@ -249,14 +280,16 @@ def pack(
 
 
 def chunk_sentences(
-    sentences: Iterable[Tuple[str, List[int], int]], max_tokens: int
+    sentences: Iterable[Tuple[str, List[int], int]],
+    max_tokens: int,
+    lang_code: str = "a",
 ) -> Iterator[Tuple[str, List[int]]]:
     """Pack sentences into chunks. An oversized sentence is packed alone from its clauses."""
     for oversized, group in groupby(sentences, key=lambda item: item[2] > max_tokens):
         if oversized:
             for sentence, _, _ in group:
                 yield from pack(
-                    split_clauses(sentence, max_tokens),
+                    split_clauses(sentence, max_tokens, lang_code),
                     max_tokens,
                     0,
                     settings.target_max_tokens,
@@ -322,7 +355,9 @@ async def smart_split(
                     processed_text = "".join(processed_text).strip()
 
             sentences = get_sentence_info(processed_text, lang_code=lang_code)
-            for chunk_text, chunk_tokens in chunk_sentences(sentences, max_tokens):
+            for chunk_text, chunk_tokens in chunk_sentences(
+                sentences, max_tokens, lang_code
+            ):
                 chunk_count += 1
                 logger.info(
                     f"Yielding chunk {chunk_count}: '{chunk_text[:50]}{'...' if len(chunk_text) > 50 else ''}' ({len(chunk_tokens)} tokens)"

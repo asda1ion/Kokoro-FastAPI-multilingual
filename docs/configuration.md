@@ -123,6 +123,7 @@ Names are the field names from `api/src/core/config.py`, uppercased. Unrecognize
 | `MAX_TOTAL_PAUSE_S` | `300.0` | Ceiling for total pause silence per request, over it is a 400 |
 | `MAX_INPUT_LENGTH` | `1000000` | Ceiling for characters of text per request, over it is a 400 |
 | `ADVANCED_TEXT_NORMALIZATION` | `true` | Master switch for number/URL/email expansion before phonemizing; English only, per-request fields in [Text normalization](#text-normalization) |
+| `PHONEME_BRIDGE` | `true` | Kill switch for experimental pronunciation routes. Requests can also set `phoneme_bridge: false`; native routes and detection remain enabled. Experimental routes are not available in this slice. |
 
 **Audio**
 
@@ -169,6 +170,8 @@ Names are the field names from `api/src/core/config.py`, uppercased. Unrecognize
 ## Text normalization
 
 `normalization_options` on the speech endpoints, per request. The normalizer runs for English only, the one language with a normalizer registered. Other languages go to the phonemizer as written, `remove_emoji` aside.
+
+See [Multilingual speech](multilingual.md) for automatic language spans, native aliases and unsupported-language errors.
 
 | Field | Default | |
 |---|---|---|

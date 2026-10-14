@@ -2,6 +2,8 @@
 
 [Configuration](configuration.md) · [Troubleshooting](troubleshooting.md) · [Voice tuning](inno-tune.md)
 
+[Multilingual speech](multilingual.md)
+
 ### Deployment
 - [DigitalOcean](deployment/digitalocean.md)
 - [Kubernetes / Helm](deployment/kubernetes.md)

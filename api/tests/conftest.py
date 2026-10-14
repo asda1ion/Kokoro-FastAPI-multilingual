@@ -16,6 +16,18 @@ settings.register_profile("ci", max_examples=500, deadline=None, derandomize=Tru
 settings.load_profile("ci" if os.environ.get("CI") else "dev")
 
 
+@pytest.fixture(autouse=True)
+def mock_chunk_g2p(monkeypatch, request):
+    if request.path.name == "test_real_model.py" or "integration" in request.path.parts:
+        return
+    from api.src.services.text_processing import text_processor
+
+    def phonemize(text, language):
+        return "h" * (len(text) * (3 if language == "z" else 1))
+
+    monkeypatch.setattr(text_processor, "phonemize", phonemize)
+
+
 @pytest.fixture
 def mock_voice_tensor():
     """Load a real voice tensor for testing."""

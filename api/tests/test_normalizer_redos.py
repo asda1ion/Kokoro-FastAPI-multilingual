@@ -123,7 +123,7 @@ def test_join_lines_is_fast():
         assert time.monotonic() - start < BUDGET_S
 
 
-def test_unbalanced_brackets_are_fast():
+def test_unbalanced_brackets_are_fast(mock_chunk_g2p):
     """Stray brackets must not hang the splitter (issue #287)."""
     from api.src.services.text_processing.text_processor import get_sentence_info
 

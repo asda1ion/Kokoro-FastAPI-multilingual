@@ -31,7 +31,7 @@ def test_lang_code_accepts_known(value):
     assert _req(lang_code=value).lang_code == value
 
 
-@pytest.mark.parametrize("value", ["xx-INVALID", "zz", "en-us", ""])
+@pytest.mark.parametrize("value", ["xx-INVALID", "zz", ""])
 def test_lang_code_rejects_unknown(value):
     with pytest.raises(ValidationError):
         _req(lang_code=value)

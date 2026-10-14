@@ -14,6 +14,7 @@ from pydantic import (
 )
 
 from ..core.config import settings
+from ..core.languages import canonical_language
 
 
 class TTSStatus(str, Enum):
@@ -36,14 +37,7 @@ Volume = Annotated[float, Field(ge=VOLUME_MIN, le=VOLUME_MAX)]
 
 def _known_lang_code(value: str) -> str:
     """Fail at the request boundary, not on KPipeline's assert deep inside inference."""
-    # deferred import, keeps torch out of every schema import
-    from kokoro.pipeline import LANG_CODES
-
-    if value not in LANG_CODES:
-        raise ValueError(
-            f"unsupported lang_code {value!r}, expected one of {sorted(LANG_CODES)}"
-        )
-    return value
+    return canonical_language(value)
 
 
 LangCode = Annotated[str, AfterValidator(_known_lang_code)]
@@ -217,7 +211,11 @@ class OpenAISpeechRequest(VoiceAliasesMixin):
     )
     lang_code: Optional[LangCode] = Field(
         default=None,
-        description="Optional language code to use for text processing. If not provided, will use first letter of voice name.",
+        description="Native Kokoro code, ISO/locale alias, or auto for offline language detection. If omitted, uses the configured language or voice prefix.",
+    )
+    phoneme_bridge: bool = Field(
+        default=True,
+        description="Allow experimental phoneme bridging when available. The server setting can disable it globally.",
     )
     volume_multiplier: Optional[Volume] = Field(
         default=1.0, description="A volume multiplier to multiply the output audio by."
@@ -311,6 +309,7 @@ class DialogueRequest(VoiceAliasesMixin):
         default=None,
         description="Optional language code override. If not provided, each turn uses the language implied by its own voice.",
     )
+    phoneme_bridge: bool = Field(default=True)
     volume_multiplier: Optional[Volume] = Field(
         default=1.0, description="A volume multiplier to multiply the output audio by."
     )
@@ -372,6 +371,7 @@ class CaptionedSpeechRequest(VoiceAliasesMixin):
         default=None,
         description="Optional language code to use for text processing. If not provided, will use first letter of voice name.",
     )
+    phoneme_bridge: bool = Field(default=True)
     volume_multiplier: Optional[Volume] = Field(
         default=1.0, description="A volume multiplier to multiply the output audio by."
     )

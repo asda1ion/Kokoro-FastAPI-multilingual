@@ -8,6 +8,7 @@ from loguru import logger
 from ..core.config import settings
 from ..services.audio import AudioNormalizer
 from ..services.streaming_audio_writer import StreamingAudioWriter
+from ..services.text_processing.language_routing import prepare_speech_segments
 from ..services.text_processing.text_processor import (
     check_pause_budget,
     check_speakable,
@@ -195,6 +196,7 @@ async def create_dialogue(
         return_download_link=request.return_download_link,
         return_timing=request.return_timing,
         lang_code=request.lang_code,
+        phoneme_bridge=request.phoneme_bridge,
         volume_multiplier=request.volume_multiplier,
         normalization_options=request.normalization_options,
         allow_voice_tags=True,  # always on here
@@ -240,6 +242,14 @@ async def create_captioned_speech(
             request.allow_voice_tags,
             request.normalization_options,
         )
+        prepared_segments = prepare_speech_segments(
+            request.input,
+            voice_name,
+            request.lang_code,
+            request.normalization_options,
+            request.allow_voice_tags,
+            getattr(request, "phoneme_bridge", True),
+        )
 
         # Set content type based on format
         content_type = {
@@ -256,7 +266,12 @@ async def create_captioned_speech(
         if request.stream:
             # Create generator but don't start it yet
             generator = stream_audio_chunks(
-                tts_service, request, client_request, writer, voice_name
+                tts_service,
+                request,
+                client_request,
+                writer,
+                voice_name,
+                prepared_segments=prepared_segments,
             )
 
             # If download link requested, wrap generator with temp file writer
@@ -396,6 +411,8 @@ async def create_captioned_speech(
                 normalization_options=request.normalization_options,
                 lang_code=request.lang_code,
                 allow_voice_tags=request.allow_voice_tags,
+                prepared_segments=prepared_segments,
+                phoneme_bridge=request.phoneme_bridge,
                 output_format=request.response_format,
             )
             output = audio_data.output

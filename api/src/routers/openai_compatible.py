@@ -15,6 +15,11 @@ from ..core.config import settings
 from ..inference.base import AudioChunk
 from ..inference.voice_manager import get_manager as get_voice_manager
 from ..services.streaming_audio_writer import StreamingAudioWriter
+from ..services.text_processing.language_routing import (
+    SpeechSegment,
+    language_capabilities,
+    prepare_speech_segments,
+)
 from ..services.text_processing.text_processor import (
     VOICE_TAG_PATTERN,
     check_pause_budget,
@@ -264,6 +269,7 @@ async def stream_audio_chunks(
     writer: StreamingAudioWriter,
     voice_name: str,
     timings: Optional[list] = None,
+    prepared_segments: Optional[List[SpeechSegment]] = None,
 ) -> AsyncGenerator[AudioChunk, None]:
     """Stream audio chunks as they're generated with client disconnect handling"""
     assert isinstance(voice_name, str) and voice_name, "voice_name skipped validation"
@@ -283,6 +289,8 @@ async def stream_audio_chunks(
                 return_timestamps=return_timestamps,
                 allow_voice_tags=request.allow_voice_tags,
                 timings=timings,
+                prepared_segments=prepared_segments,
+                phoneme_bridge=getattr(request, "phoneme_bridge", True),
             )
         ) as audio_stream:
             async for chunk_data in audio_stream:
@@ -299,6 +307,11 @@ async def stream_audio_chunks(
         logger.error(f"Error in audio streaming: {str(e)}")
         # Let the exception propagate to trigger cleanup
         raise
+
+
+@router.get("/audio/languages")
+async def list_languages():
+    return language_capabilities()
 
 
 @router.post("/audio/speech")
@@ -343,6 +356,14 @@ async def create_speech(
             request.allow_voice_tags,
             request.normalization_options,
         )
+        prepared_segments = prepare_speech_segments(
+            request.input,
+            voice_name,
+            request.lang_code,
+            request.normalization_options,
+            request.allow_voice_tags,
+            request.phoneme_bridge,
+        )
 
         # Set content type based on format
         content_type = {
@@ -363,7 +384,13 @@ async def create_speech(
             )
             # Create generator but don't start it yet
             generator = stream_audio_chunks(
-                tts_service, request, client_request, writer, voice_name, timings
+                tts_service,
+                request,
+                client_request,
+                writer,
+                voice_name,
+                timings,
+                prepared_segments,
             )
 
             # If download link requested, wrap generator with temp file writer
@@ -466,6 +493,8 @@ async def create_speech(
                 lang_code=request.lang_code,
                 allow_voice_tags=request.allow_voice_tags,
                 output_format=request.response_format,
+                prepared_segments=prepared_segments,
+                phoneme_bridge=request.phoneme_bridge,
             )
             output = audio_data.output
 

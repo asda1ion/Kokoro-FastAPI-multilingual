@@ -134,10 +134,10 @@ def test_smart_split_only_moves_whitespace(text, target_max):
 )
 def test_smart_split_honours_token_cap(text, target_max, max_tokens):
     chunks = chunks_of(text, target_max, max_tokens)
-    assert words(" ".join(chunk for chunk, _ in chunks)) == words(text)
-    assert all(
-        len(tokens) <= max_tokens or " " not in chunk for chunk, tokens in chunks
+    assert squash(" ".join(chunk for chunk, _ in chunks)).replace(".", "") == squash(
+        text
     )
+    assert all(len(tokens) <= max_tokens for _, tokens in chunks)
 
 
 @given(

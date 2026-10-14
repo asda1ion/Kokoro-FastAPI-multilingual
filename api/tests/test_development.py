@@ -18,7 +18,7 @@ client = TestClient(app)
 @pytest.fixture
 def mock_tts_service():
     service = AsyncMock(spec=TTSService)
-    service.list_voices.return_value = ["test_voice"]
+    service.list_voices.return_value = ["af_test_voice"]
     with patch.object(TTSService, "create", AsyncMock(return_value=service)):
         yield service
 
@@ -28,7 +28,7 @@ def captioned(**body):
         "/dev/captioned_speech",
         json={
             "model": "kokoro",
-            "voice": "test_voice",
+            "voice": "af_test_voice",
             "response_format": "mp3",
             **body,
         },

@@ -22,10 +22,10 @@ from ..inference.voice_manager import get_manager as get_voice_manager
 from ..structures.schemas import NormalizationOptions, clamp_rate
 from .audio import AudioNormalizer, AudioService
 from .streaming_audio_writer import StreamingAudioWriter
+from .text_processing.language_routing import SpeechSegment, prepare_speech_segments
 from .text_processing.text_processor import (
     check_pause_budget,
     smart_split,
-    split_by_voice,
 )
 
 
@@ -266,7 +266,11 @@ class TTSService:
         lang_code: Optional[str],
         normalization_options: Optional[NormalizationOptions],
         allow_voice_tags: bool = False,
-    ) -> AsyncGenerator[Tuple[str, str, str, float, str, List[int], Optional[float]], None]:
+        prepared_segments: Optional[List[SpeechSegment]] = None,
+        phoneme_bridge: bool = True,
+    ) -> AsyncGenerator[
+        Tuple[str, str, str, float, str, List[int], Optional[float]], None
+    ]:
         """Chunk text across [voice:...] and [rate:...] segments.
 
         Yields (voice_name, voice_path, lang_code, rate, chunk_text, tokens, pause_s).
@@ -280,20 +284,25 @@ class TTSService:
         resolved: Dict[str, Tuple[str, str]] = {}
         normalization_options = normalization_options or NormalizationOptions()
         segments = (
-            split_by_voice(text, voice) if allow_voice_tags else [(voice, 1.0, text)]
+            prepared_segments
+            if prepared_segments is not None
+            else prepare_speech_segments(
+                text,
+                voice,
+                lang_code or settings.default_voice_code,
+                normalization_options,
+                allow_voice_tags,
+                phoneme_bridge,
+            )
         )
 
-        for segment_voice, segment_rate, segment_text in segments:
+        for segment in segments:
+            segment_voice, segment_rate = segment.voice, segment.rate
+            segment_text, segment_lang = segment.span.text, segment.span.lang_code
             if segment_voice not in resolved:
                 resolved[segment_voice] = await self.get_voices_path(segment_voice)
             voice_name, voice_path = resolved[segment_voice]
 
-            # request lang_code wins, then default_voice_code setting, else each speaker gets the pipeline their prefix implies
-            segment_lang = (
-                lang_code
-                or settings.default_voice_code
-                or segment_voice[:1].lower()
-            )
             logger.debug(
                 f"Using voice path '{voice_path}' with lang_code '{segment_lang}'"
             )
@@ -326,6 +335,8 @@ class TTSService:
         return_timestamps: Optional[bool] = False,
         allow_voice_tags: bool = False,
         timings: Optional[List[dict]] = None,
+        prepared_segments: Optional[List[SpeechSegment]] = None,
+        phoneme_bridge: bool = True,
     ) -> AsyncGenerator[AudioChunk, None]:
         """Generate and stream audio chunks."""
         stream_normalizer = AudioNormalizer()
@@ -334,6 +345,15 @@ class TTSService:
         try:
             # backstop for direct callers; routers check pre-stream for a clean 400
             check_pause_budget(text)
+            if prepared_segments is None:
+                prepared_segments = prepare_speech_segments(
+                    text,
+                    voice,
+                    lang_code or settings.default_voice_code,
+                    normalization_options,
+                    allow_voice_tags,
+                    phoneme_bridge,
+                )
             await self.model_manager.ensure_backend()
 
             # Process text in chunks with smart splitting, handling voice and pause tags
@@ -346,7 +366,13 @@ class TTSService:
                 tokens,
                 pause_duration_s,
             ) in self._split_multi_voice(
-                text, voice, lang_code, normalization_options, allow_voice_tags
+                text,
+                voice,
+                lang_code,
+                normalization_options,
+                allow_voice_tags,
+                prepared_segments,
+                phoneme_bridge,
             ):
                 if pause_duration_s is not None and pause_duration_s > 0:
                     # --- Handle Pause Chunk ---
@@ -505,6 +531,8 @@ class TTSService:
         lang_code: Optional[str] = None,
         allow_voice_tags: bool = False,
         output_format: str = "wav",
+        prepared_segments: Optional[List[SpeechSegment]] = None,
+        phoneme_bridge: bool = True,
     ) -> AudioChunk:
         """Generate complete audio for text, encoding chunks as they arrive."""
         output_parts = []
@@ -522,6 +550,8 @@ class TTSService:
                 lang_code=lang_code,
                 output_format=output_format,
                 allow_voice_tags=allow_voice_tags,
+                prepared_segments=prepared_segments,
+                phoneme_bridge=phoneme_bridge,
             ):
                 if audio_stream_data.output:
                     output_parts.append(audio_stream_data.output)

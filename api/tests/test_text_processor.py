@@ -28,6 +28,9 @@ def shouting_language(monkeypatch):
     registry = {"xx": ShoutingNormalizer()}
     monkeypatch.setattr(text_processor, "get_normalizer", registry.get)
     monkeypatch.setattr(text_processor.settings, "advanced_text_normalization", True)
+    monkeypatch.setattr(
+        text_processor, "phonemize", lambda text, language: "h" * len(text)
+    )
 
 
 async def first_chunk_text(**kwargs) -> str:
@@ -599,7 +602,8 @@ def test_split_words_fits_each_piece(monkeypatch):
         ("e", [0]),
     ]
     assert text_processor.split_words("abcdef gh", 3) == [
-        ("abcdef", [0] * 6),
+        ("abc", [0] * 3),
+        ("def", [0] * 3),
         ("gh", [0, 0]),
     ]
     assert text_processor.split_words("a [b c](/d/) e", 3) == [
@@ -620,7 +624,8 @@ def test_split_clauses_keeps_separators_and_falls_back_to_words(monkeypatch):
         ("e", [0]),
     ]
     assert list(text_processor.split_clauses("abcdefgh ij, k", 5)) == [
-        ("abcdefgh", [0] * 8),
+        ("abcde", [0] * 5),
+        ("fgh", [0] * 3),
         ("ij,", [0] * 3),
         ("k", [0]),
     ]

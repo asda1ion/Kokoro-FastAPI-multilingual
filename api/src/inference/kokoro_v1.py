@@ -197,6 +197,10 @@ class KokoroV1(BaseModelBackend):
         if not self._model:
             raise RuntimeError("Model not loaded")
 
+        from ..core.languages import canonical_language
+
+        lang_code = canonical_language(lang_code, allow_auto=False)
+
         if lang_code not in self._pipelines:
             logger.info(f"Creating new pipeline for language code: {lang_code}")
             self._pipelines[lang_code] = KPipeline(
