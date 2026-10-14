@@ -1,12 +1,12 @@
 # Multilingual speech
 
-`POST /v1/audio/speech` accepts `lang_code: "auto"` to detect contiguous language spans offline with Lingua. Every span keeps the request's selected voice and speed. Audio is encoded and streamed through the existing chunked path; language preparation does not generate or buffer audio.
+The web player's default **Multilingual** option sends `lang_code: "multi"` to `POST /v1/audio/speech`. Lingua classifies individual words offline, then adjacent words with the same language share a pronunciation span. `auto` remains an API alias for the same behavior. Every span keeps the request's selected voice and speed. Audio is encoded and streamed through the existing chunked path; language preparation does not generate or buffer audio.
 
 ```json
 {
-  "input": "Hello everyone! Bonjour tout le monde! 日本語です。",
+  "input": "Привет, people! Bonjour tout le monde! 日本語です。",
   "voice": "af_bella",
-  "lang_code": "auto",
+  "lang_code": "multi",
   "speed": 1.0,
   "response_format": "mp3"
 }
@@ -34,7 +34,9 @@ On this macOS deployment, Misaki initializes the bundled eSpeak library and data
 
 Automatic detection uses all of Lingua's supported languages, including languages without native Kokoro speech support. `GET /v1/audio/languages` reports `protocol_version: 1`, `native` routes, `auto_detection.languages` (ISO 639-1 codes), installed `experimental` manual routes, and `phoneme_bridge` enabled/available flags. Detection coverage does not promise speech support. Bridged speech is always labeled experimental.
 
-Short spans with fewer than 13 letters and a small confidence margin inherit the nearest confidently detected phrase (earlier phrase wins ties), then the selected voice's native language. Detected English keeps British pronunciation when the fallback voice is British. Unicode is normalized to NFC without translation or letter removal. Cyrillic text goes through language detection rather than a script-to-Russian shortcut. Unknown scripts and unidentifiable text return an error suggesting an explicit `lang_code`.
+Word scores with a top-two margin below 0.15 use the nearest confident, compatible word in the same Unicode sentence (earlier words win distance ties), then a confident same-script phrase, then the selected voice's language if it is a positive-scoring candidate. Without compatible context or voice, the highest-scoring language wins. Cyrillic words therefore never inherit English pronunciation: `Привет!` uses `espeak:ru`, and `Привет, people!` uses Russian then English. Script changes inside words are split, while contiguous Han/kana text stays together for native CJK pronunciation. Repeated word scores are reused within each request.
+
+Detected English keeps British pronunciation when the fallback voice is British. Unicode is normalized to NFC without translation or letter removal. Custom phoneme units remain atomic. Cyrillic text goes through language detection rather than a script-to-Russian shortcut. Unknown scripts and unidentifiable text return an error suggesting an explicit `lang_code`. Shared words and very short text remain inherently ambiguous; explicit languages bypass those choices.
 
 All spans are checked before the speech response opens. A detected language without an installed pronunciation route returns HTTP 400. Unsupported explicit language codes return a request validation error. The experimental eSpeak bridge described below supplies non-native pronunciation; its kill switches preserve native multilingual routing.
 
@@ -46,7 +48,7 @@ Routing and error behavior have model-free tests. Real multilingual pronunciatio
 
 Every installed eSpeak language/dialect is listed under `experimental` with an explicit `espeak:<identifier>` manual route. Plain identifiers and locale aliases prefer native Kokoro routes; other installed identifiers resolve to the bridge. For example, `fr` stays native, `ru` becomes `espeak:ru`, and `espeak:fr` explicitly requests the experimental engine. Dialects such as `vi-vn-x-central` retain their installed identifiers. Unknown identifiers fail validation. Manual coverage depends on the installed library/data, independently of Lingua detection coverage; `auto_detection.speech_languages` lists the detector languages with an installed pronunciation route. Unmapped IPA can still reject a particular input on any experimental route.
 
-Confident non-native spans in `auto` use this bridge. `PHONEME_BRIDGE=false` or request `phoneme_bridge: false` rejects experimental routes before streaming while preserving native requests. The bundled library and data paths are configured explicitly before discovery, so a macOS environment needs no incidental English warmup or system Homebrew eSpeak. Missing library/data yields an empty experimental inventory and actionable rejection, rather than a silent English fallback.
+Non-native spans in `multi` (or its `auto` alias) use this bridge. `PHONEME_BRIDGE=false` or request `phoneme_bridge: false` rejects experimental routes before streaming while preserving native requests. The bundled library and data paths are configured explicitly before discovery, so a macOS environment needs no incidental English warmup or system Homebrew eSpeak. Missing library/data yields an empty experimental inventory and actionable rejection, rather than a silent English fallback.
 
 Preparation uses eSpeak IPA with stress and punctuation, then checks every mapped character against the **loaded KModel's config vocabulary**, not the separate generic text-processing vocabulary. Prepared chunks are bounded by the loaded context length minus BOS/EOS, the pipeline's 510-character limit, and `ABSOLUTE_MAX_TOKENS`. All preparation finishes before response headers; synthesis uses `generate_from_tokens` directly and keeps the selected voice, speed, ordering, pause tags and cancellation. IPA is never submitted to English G2P. Non-native numbers and accents are retained; English normalization is not applied. Custom `[word](/IPA/)` units are also checked against the loaded vocabulary. Experimental chunks have no inferred word captions; chunk timings may associate text with the first piece when a word's IPA needs several model chunks.
 

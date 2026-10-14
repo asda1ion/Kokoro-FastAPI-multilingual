@@ -113,6 +113,22 @@ test('buildRequestBody uses passed responseFormat without reading format-select 
     assert.equal(body.download_format, 'wav');
 });
 
+test('buildRequestBody includes the selected multilingual or explicit language on the wire', () => {
+    const previousDocument = globalThis.document;
+    try {
+        for (const language of ['multi', 'a']) {
+            globalThis.document = {
+                getElementById(id) { return id === 'lang-select' ? { value: language } : null; },
+                querySelectorAll() { return []; }
+            };
+            const body = new AudioService().buildRequestBody('Привет, people!', 'af_heart', 1, {}, 'wav');
+            assert.equal(JSON.parse(JSON.stringify(body)).lang_code, language);
+        }
+    } finally {
+        globalThis.document = previousDocument;
+    }
+});
+
 // Stand-in for teardown only: a real element fires an error when its src is blanked.
 class TeardownAudio {
     constructor() {

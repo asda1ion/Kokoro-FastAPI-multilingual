@@ -10,6 +10,7 @@ Per-PR attribution and contributor credits are published automatically on the co
 - `/v1/audio/speech` accepts `lang_code: "auto"` for offline multilingual pronunciation with one selected voice, plus native ISO and locale aliases. Unsupported languages fail before streaming starts.
 - `/v1/audio/languages` reports versioned native speech routes and automatic language detection coverage. `PHONEME_BRIDGE` and per-request `phoneme_bridge` can disable experimental pronunciation routes.
 ### Fixed
+- The web player's Multilingual mode sends an explicit language request and detects switches between individual words, so all text and words are phonemized. 'auto' is an alias.
 - Non-English sentence and oversized-clause processing uses the requested language's native pronunciation pipeline instead of English.
 - `/dev/tune` informative error instead of bare `Internal Server Error` if the blend solver could not converge on a reference (scipy 1.14 nnls bug)
 

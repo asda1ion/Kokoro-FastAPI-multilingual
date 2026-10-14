@@ -15,6 +15,7 @@ NATIVE_LANGUAGES = {
 }
 
 ALIASES = {
+    "multi": "auto",
     "en": "a",
     "en-us": "a",
     "en-gb": "b",

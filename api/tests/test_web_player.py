@@ -32,6 +32,7 @@ def test_web_root_serves_index():
     assert response.headers["content-type"].startswith("text/html")
     assert response.headers["cache-control"] == "no-cache"
     assert b"<html" in response.content
+    assert b'<option value="multi">Multilingual</option>' in response.content
 
 
 def test_web_missing_file_is_404():

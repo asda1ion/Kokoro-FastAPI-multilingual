@@ -74,6 +74,19 @@ def test_real_espeak_fixtures(language, text, vocab):
     assert "." in mapped.phonemes
 
 
+@pytest.mark.parametrize("text", ["Привет!", "Привет, people!"])
+def test_multi_uses_russian_word_phonemes(text, vocab):
+    segment = prepare_speech_segments(text, "af_bella", "multi")[0]
+    assert segment.span.lang_code == "espeak:ru"
+    chunks = bridge.prepare_chunks(
+        segment.span.text, segment.span.lang_code, NormalizationOptions(), vocab, 450
+    )
+    assert "prʲivʲˈet" in chunks[0].phonemes
+    assert chunks == bridge.prepare_chunks(
+        segment.span.text, "espeak:ru", NormalizationOptions(), vocab, 450
+    )
+
+
 def test_stress_softness_length_combining_marks_and_substitutions(vocab):
     assert bridge.map_ipa("ç ø œ ã", vocab).phonemes == "ç ø œ ã"
     result = bridge.map_ipa("ˌprʲˈivʲeːt n̩ ɫ ã t͡ʃ", vocab)

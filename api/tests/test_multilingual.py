@@ -23,16 +23,24 @@ from api.src.structures.schemas import NormalizationOptions, OpenAISpeechRequest
 RAW = NormalizationOptions(normalize=False)
 
 
-def detection(language, start, end):
-    return SimpleNamespace(language=language, start_index=start, end_index=end)
+def confidence(language, value=1.0):
+    return SimpleNamespace(language=language, value=value)
+
+
+def mixed_scores(text):
+    if text == "日本語です":
+        return [confidence(Language.JAPANESE)]
+    if text in {"Bonjour", "à", "tous", "tout", "le", "monde"}:
+        return [confidence(Language.FRENCH)]
+    return [confidence(Language.ENGLISH)]
 
 
 @pytest.fixture
 def detector(monkeypatch):
     mock = MagicMock()
     mock.compute_language_confidence_values.return_value = [
-        SimpleNamespace(value=0.9),
-        SimpleNamespace(value=0.1),
+        confidence(Language.ENGLISH, 0.9),
+        confidence(Language.FRENCH, 0.1),
     ]
     monkeypatch.setattr(language_routing, "get_detector", lambda: mock)
     return mock
@@ -42,6 +50,7 @@ def detector(monkeypatch):
     "alias,code",
     [
         ("auto", "auto"),
+        ("multi", "auto"),
         ("EN_us", "a"),
         ("en-GB", "b"),
         ("es", "e"),
@@ -79,12 +88,7 @@ def test_native_g2p_has_no_speech_model(code, monkeypatch):
 
 def test_mixed_spans_keep_every_character(detector):
     text = "Hello everyone! Bonjour à tous! 日本語です。"
-    french, japanese = text.index("Bonjour"), text.index("日本")
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.ENGLISH, 0, french),
-        detection(Language.FRENCH, french, japanese),
-        detection(Language.JAPANESE, japanese, len(text)),
-    ]
+    detector.compute_language_confidence_values.side_effect = mixed_scores
     spans = prepare_language_spans(text, "auto", "a", RAW)
     assert [span.lang_code for span in spans] == ["a", "f", "j"]
     assert "".join(span.text for span in spans) == text
@@ -98,19 +102,12 @@ def test_offline_lingua_refines_neighboring_sentences():
 
 
 def test_short_ambiguity_inherits_phrase_then_voice(detector):
-    detector.compute_language_confidence_values.return_value = [
-        SimpleNamespace(value=0.51),
-        SimpleNamespace(value=0.49),
-    ]
-    text = "OK. Bonjour tout le monde."
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.ENGLISH, 0, 4),
-        detection(Language.FRENCH, 4, len(text)),
-    ]
+    ambiguous = [confidence(Language.ENGLISH, 0.51), confidence(Language.FRENCH, 0.49)]
+    detector.compute_language_confidence_values.side_effect = lambda word: (
+        ambiguous if word == "OK" else mixed_scores(word)
+    )
+    text = "OK Bonjour tout le monde."
     assert prepare_language_spans(text, "auto", "a", RAW)[0].lang_code == "f"
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.ENGLISH, 0, 3)
-    ]
     assert prepare_language_spans("OK.", "auto", "b", RAW)[0].lang_code == "b"
 
 
@@ -119,7 +116,7 @@ def test_short_ambiguity_inherits_phrase_then_voice(detector):
 def test_cyrillic_is_detected_as_a_language_not_a_script_route(
     detector, language, bridge
 ):
-    detector.detect_multiple_languages_of.return_value = [detection(language, 0, 20)]
+    detector.compute_language_confidence_values.return_value = [confidence(language)]
     if bridge:
         spans = prepare_language_spans(
             "Это длинное предложение.", "auto", "a", RAW, bridge
@@ -133,18 +130,18 @@ def test_cyrillic_is_detected_as_a_language_not_a_script_route(
 def test_unknown_script_is_explicit_error(detector):
     with pytest.raises(ValueError, match="explicit lang_code"):
         prepare_language_spans("សួស្តី", "auto", "a", RAW)
-    detector.detect_multiple_languages_of.assert_not_called()
+    detector.compute_language_confidence_values.assert_not_called()
 
 
 def test_unidentifiable_text_suggests_override(detector):
-    detector.detect_multiple_languages_of.return_value = []
+    detector.compute_language_confidence_values.return_value = []
     with pytest.raises(ValueError, match="explicit lang_code"):
         prepare_language_spans("unidentifiable text", "auto", "a", RAW)
 
 
 def test_auto_normalizes_unicode_without_removing_accents(detector):
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.FRENCH, 0, 20)
+    detector.compute_language_confidence_values.return_value = [
+        confidence(Language.FRENCH)
     ]
     spans = prepare_language_spans("12 cafe\u0301s français", "auto", "a", RAW)
     assert spans[0].text == "12 cafés français"
@@ -153,8 +150,8 @@ def test_auto_normalizes_unicode_without_removing_accents(detector):
 
 def test_global_bridge_switch_is_enforced(detector, monkeypatch):
     monkeypatch.setattr(settings, "phoneme_bridge", False)
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.RUSSIAN, 0, 30)
+    detector.compute_language_confidence_values.return_value = [
+        confidence(Language.RUSSIAN)
     ]
     with pytest.raises(ValueError, match="bridge is disabled"):
         prepare_language_spans("Это длинное предложение.", "auto", "a", RAW, True)
@@ -162,16 +159,18 @@ def test_global_bridge_switch_is_enforced(detector, monkeypatch):
 
 def test_literal_policies_do_not_detect_control_or_ipa_text(detector):
     text = "Bonjour [pause:1s] [mot](/həlˈoʊ/) 😊"
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.FRENCH, 0, len(text))
+    detector.compute_language_confidence_values.return_value = [
+        confidence(Language.FRENCH)
     ]
     spans = prepare_language_spans(
         text, "auto", "a", NormalizationOptions(remove_emoji=True)
     )
     assert spans[0].text == text
-    probe = detector.detect_multiple_languages_of.call_args.args[0]
-    assert len(probe) == len(text)
-    assert "pause" not in probe and "həl" not in probe and "😊" not in probe
+    probes = [
+        call.args[0]
+        for call in detector.compute_language_confidence_values.call_args_list
+    ]
+    assert probes == ["Bonjour", "mot"]
 
 
 async def test_language_survives_sentence_clause_and_word_sizing(monkeypatch):
@@ -198,10 +197,7 @@ async def test_language_survives_sentence_clause_and_word_sizing(monkeypatch):
 async def test_mixed_stream_preserves_voice_speed_and_order(detector, monkeypatch):
     text = "Hello everyone! Bonjour tout le monde!"
     boundary = text.index("Bonjour")
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.ENGLISH, 0, boundary),
-        detection(Language.FRENCH, boundary, len(text)),
-    ]
+    detector.compute_language_confidence_values.side_effect = mixed_scores
     monkeypatch.setattr(
         text_processor, "phonemize", lambda text, language: "h" * len(text)
     )
@@ -249,11 +245,12 @@ def speech_service(monkeypatch):
 
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize("bridge", [False])
+@pytest.mark.parametrize("language", ["auto", "multi"])
 def test_unsupported_language_rejected_before_writer_or_dispatch(
-    detector, speech_service, monkeypatch, stream, bridge
+    detector, speech_service, monkeypatch, stream, bridge, language
 ):
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.RUSSIAN, 0, 30)
+    detector.compute_language_confidence_values.return_value = [
+        confidence(Language.RUSSIAN)
     ]
     writer = MagicMock()
     monkeypatch.setattr(openai_compatible, "StreamingAudioWriter", writer)
@@ -262,7 +259,7 @@ def test_unsupported_language_rejected_before_writer_or_dispatch(
         json={
             "input": "Это длинное предложение.",
             "voice": "af_bella",
-            "lang_code": "auto",
+            "lang_code": language,
             "stream": stream,
             "phoneme_bridge": bridge,
         },
@@ -307,8 +304,8 @@ def test_captioned_route_rejects_unsupported_language_before_stream(
         development, "get_tts_service", AsyncMock(return_value=speech_service)
     )
     app.dependency_overrides[dependency] = lambda: speech_service
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.RUSSIAN, 0, 30)
+    detector.compute_language_confidence_values.return_value = [
+        confidence(Language.RUSSIAN)
     ]
     try:
         response = TestClient(app).post(
@@ -360,13 +357,107 @@ def test_non_english_numbers_and_unicode_remain_native(monkeypatch):
     assert seen == [("12 cafés, हिन्दी!", "f")]
 
 
-def test_russian_english_code_switching(detector):
+def test_russian_english_code_switching():
     text = "Привет, друзья. This is an English sentence."
-    boundary = text.index("This")
-    detector.detect_multiple_languages_of.return_value = [
-        detection(Language.RUSSIAN, 0, boundary),
-        detection(Language.ENGLISH, boundary, len(text)),
-    ]
     spans = prepare_language_spans(text, "auto", "a", RAW)
     assert [span.lang_code for span in spans] == ["espeak:ru", "a"]
     assert "".join(span.text for span in spans) == text
+
+
+@pytest.mark.parametrize("fallback", ["a", "b"])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Привет!", ["espeak:ru"]),
+        ("Привет, people!", ["espeak:ru", "en"]),
+        ("people, Привет!", ["en", "espeak:ru"]),
+        ("Hello people!", ["en"]),
+        ("HelloПривет!", ["en", "espeak:ru"]),
+        ("Привіт, people!", ["espeak:uk", "en"]),
+        ("Bonjour people!", ["f", "en"]),
+        ("日本語です。中文。", ["j", "z"]),
+    ],
+)
+def test_real_word_routing_and_auto_alias(text, expected, fallback):
+    expected = [fallback if code == "en" else code for code in expected]
+    spans = prepare_language_spans(text, "multi", fallback, RAW)
+    assert [span.lang_code for span in spans] == expected
+    assert "".join(span.text for span in spans) == text
+    assert spans == prepare_language_spans(text, "auto", fallback, RAW)
+
+
+def test_ambiguous_words_use_only_compatible_context(detector):
+    def scores(word):
+        if word == "Привет":
+            return [
+                confidence(Language.RUSSIAN, 0.52),
+                confidence(Language.BULGARIAN, 0.48),
+            ]
+        return [confidence(Language.ENGLISH)]
+
+    detector.compute_language_confidence_values.side_effect = scores
+    spans = prepare_language_spans("Привет people", "multi", "a", RAW)
+    assert [span.lang_code for span in spans] == ["espeak:ru", "a"]
+
+
+def test_ambiguous_context_ties_prefer_earlier_word(detector):
+    detector.compute_language_confidence_values.side_effect = lambda word: {
+        "Bonjour": [confidence(Language.FRENCH)],
+        "chat": [confidence(Language.ENGLISH, 0.51), confidence(Language.FRENCH, 0.49)],
+        "people": [confidence(Language.ENGLISH)],
+    }[word]
+    spans = prepare_language_spans("Bonjour chat people", "multi", "a", RAW)
+    assert [(span.text, span.lang_code) for span in spans] == [
+        ("Bonjour chat ", "f"),
+        ("people", "a"),
+    ]
+
+
+def test_context_does_not_cross_sentence_boundaries(detector):
+    detector.compute_language_confidence_values.side_effect = lambda word: (
+        [confidence(Language.FRENCH)]
+        if word == "Bonjour"
+        else [confidence(Language.ENGLISH, 0.51), confidence(Language.FRENCH, 0.49)]
+    )
+    spans = prepare_language_spans("Bonjour! chat", "multi", "a", RAW)
+    assert [span.lang_code for span in spans] == ["f", "a"]
+
+
+def test_phrase_context_resolves_ambiguous_words(detector):
+    detector.compute_language_confidence_values.side_effect = lambda word: (
+        [confidence(Language.FRENCH)]
+        if word == "tout le monde"
+        else [confidence(Language.ENGLISH, 0.51), confidence(Language.FRENCH, 0.49)]
+    )
+    assert (
+        prepare_language_spans("tout le monde", "multi", "a", RAW)[0].lang_code == "f"
+    )
+
+
+def test_repeated_words_are_scored_once_per_request(detector):
+    prepare_language_spans("people people. people!", "multi", "a", RAW)
+    detector.compute_language_confidence_values.assert_called_once_with("people")
+
+
+def test_multi_rejects_missing_russian_route_before_dispatch(
+    speech_service, monkeypatch
+):
+    monkeypatch.setattr(language_routing.espeak, "installed_languages", lambda: {})
+    response = TestClient(app).post(
+        "/v1/audio/speech",
+        json={"input": "Привет, people!", "voice": "af_bella", "lang_code": "multi"},
+    )
+    assert response.status_code == 400
+    assert "no installed speech route" in response.json()["detail"]["message"]
+    speech_service.prepare_bridge_segments.assert_not_called()
+    speech_service.generate_audio_stream.assert_not_called()
+
+
+def test_multi_preserves_custom_ipa_numbers_and_normalized_text():
+    text = "12 Привет, [two people](/həlˈoʊ/) [pause:0.2s] cafe\u0301s français 😊!"
+    spans = prepare_language_spans(
+        text, "multi", "a", NormalizationOptions(remove_emoji=True)
+    )
+    assert "".join(span.text for span in spans) == text.replace("cafe\u0301s", "cafés")
+    assert any("[two people](/həlˈoʊ/)" in span.text for span in spans)
+    assert spans[0].lang_code == "espeak:ru"

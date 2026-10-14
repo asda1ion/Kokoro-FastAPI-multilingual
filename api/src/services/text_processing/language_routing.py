@@ -1,12 +1,14 @@
 """Prepare language spans without loading speech models or generating audio."""
 
 import unicodedata
+from bisect import bisect_left
 from dataclasses import dataclass
 from functools import lru_cache
+from itertools import groupby
 
 import regex
 from lingua import Language, LanguageDetectorBuilder
-from unicode_segmentation_rs import unicode_sentences
+from unicode_segmentation_rs import split_word_bounds, unicode_sentences
 
 from ...core import espeak
 from ...core.config import settings
@@ -16,10 +18,29 @@ from .phoneme_bridge import BridgeChunk, mapping_metadata
 from .text_processor import CUSTOM_PHONEMES, PAUSE_TAG_PATTERN, split_by_voice
 
 KNOWN_LETTERS = regex.compile(
-    r"[\p{Latin}\p{Cyrillic}\p{Arabic}\p{Armenian}\p{Bengali}"
-    r"\p{Devanagari}\p{Georgian}\p{Greek}\p{Gujarati}\p{Gurmukhi}"
-    r"\p{Han}\p{Hangul}\p{Hebrew}\p{Hiragana}\p{Katakana}"
-    r"\p{Tamil}\p{Telugu}\p{Thai}]"
+    "|".join(
+        rf"(?P<{script}>\p{{{script}}})"
+        for script in (
+            "Latin",
+            "Cyrillic",
+            "Arabic",
+            "Armenian",
+            "Bengali",
+            "Devanagari",
+            "Georgian",
+            "Greek",
+            "Gujarati",
+            "Gurmukhi",
+            "Han",
+            "Hangul",
+            "Hebrew",
+            "Hiragana",
+            "Katakana",
+            "Tamil",
+            "Telugu",
+            "Thai",
+        )
+    )
 )
 
 
@@ -44,37 +65,127 @@ class DetectedSpan:
     end_index: int
 
 
-def detect_spans(text: str, detector) -> list[DetectedSpan]:
-    detected = detector.detect_multiple_languages_of(text)
-    refined = []
-    for index, result in enumerate(detected):
-        end = (
-            detected[index + 1].start_index if index + 1 < len(detected) else len(text)
-        )
-        fragment = text[result.start_index : end]
-        sentences = list(unicode_sentences(fragment))
-        if len(sentences) <= 1:
-            refined.append(result)
-            continue
-        # Lingua can merge neighboring sentences that use different languages.
-        cursor = 0
-        for sentence in sentences:
-            offset = fragment.index(sentence, cursor)
-            cursor = offset + len(sentence)
-            items = detector.detect_multiple_languages_of(sentence)
-            if not items and regex.search(r"\p{L}", sentence):
-                raise ValueError(
-                    "Cannot identify the language; specify an explicit lang_code."
-                )
-            for item in items:
-                refined.append(
-                    DetectedSpan(
-                        item.language,
-                        result.start_index + offset + item.start_index,
-                        result.start_index + offset + item.end_index,
-                    )
-                )
-    return refined
+def _script(text: str) -> str | None:
+    match = KNOWN_LETTERS.search(text)
+    if match is None:
+        return None
+    script = match.lastgroup
+    return "CJK" if script in {"Han", "Hiragana", "Katakana"} else script
+
+
+def _words(text: str, protected=()):
+    words = []
+
+    def append(start, end, word):
+        script = _script(word)
+        if script is None:
+            return
+        if (
+            words
+            and script == "CJK"
+            and words[-1][3] == script
+            and words[-1][1] == start
+        ):
+            previous = words.pop()
+            words.append((previous[0], end, previous[2] + word, script))
+        else:
+            words.append((start, end, word, script))
+
+    cursor = 0
+    for start, end in [*protected, (len(text), len(text))]:
+        for word in split_word_bounds(text[cursor:start]):
+            begin, script = cursor, None
+            for cluster in regex.findall(r"\X", word):
+                next_script = _script(cluster)
+                if (
+                    script is not None
+                    and next_script is not None
+                    and script != next_script
+                ):
+                    append(begin, cursor, text[begin:cursor])
+                    begin = cursor
+                script = next_script or script
+                cursor += len(cluster)
+            append(begin, cursor, text[begin:cursor])
+        if end > start:
+            # A custom IPA unit must never be split between pronunciation routes.
+            append(start, end, text[start:end].strip())
+        cursor = end
+    return words
+
+
+def _confident(scores) -> bool:
+    return len(scores) == 1 or scores[0].value - scores[1].value >= 0.15
+
+
+def detect_spans(
+    text: str, detector, fallback: str, protected=()
+) -> list[DetectedSpan]:
+    words = _words(text, protected)
+    cache = {}
+
+    def scores(fragment):
+        if fragment not in cache:
+            cache[fragment] = [
+                item
+                for item in detector.compute_language_confidence_values(fragment)
+                if item.value > 0
+            ]
+        if not cache[fragment]:
+            raise ValueError(
+                "Cannot identify the language; specify an explicit lang_code."
+            )
+        return cache[fragment]
+
+    fallback_language = NATIVE_LANGUAGES[fallback][0].split("-")[0]
+    detected = []
+    cursor = word_index = 0
+    for sentence in unicode_sentences(text):
+        start = text.index(sentence, cursor)
+        cursor = start + len(sentence)
+        begin = word_index
+        while word_index < len(words) and words[word_index][0] < cursor:
+            word_index += 1
+        sentence_words = words[begin:word_index]
+        candidates = [scores(word[2]) for word in sentence_words]
+        anchors = {}
+        for index, values in enumerate(candidates):
+            if _confident(values):
+                anchors.setdefault(values[0].language, []).append(index)
+        contexts = {}
+        for _, group in groupby(enumerate(sentence_words), key=lambda item: item[1][3]):
+            run = list(group)
+            bounds = (run[0][1][0], run[-1][1][1])
+            contexts.update((index, bounds) for index, _ in run)
+        for index, (word, values) in enumerate(zip(sentence_words, candidates)):
+            language = values[0].language
+            if not _confident(values):
+                compatible = {item.language for item in values}
+                neighbors = []
+                for candidate in compatible:
+                    positions = anchors.get(candidate, [])
+                    insertion = bisect_left(positions, index)
+                    for position in positions[max(0, insertion - 1) : insertion + 1]:
+                        neighbors.append((abs(position - index), position, candidate))
+                if neighbors:
+                    language = min(neighbors, key=lambda item: item[:2])[2]
+                else:
+                    left, right = contexts[index]
+                    context = scores(text[left:right].strip())
+                    if _confident(context) and context[0].language in compatible:
+                        language = context[0].language
+                    else:
+                        language = next(
+                            (
+                                item.language
+                                for item in values
+                                if item.language.iso_code_639_1.name.lower()
+                                == fallback_language
+                            ),
+                            language,
+                        )
+            detected.append(DetectedSpan(language, word[0], word[1]))
+    return detected
 
 
 @lru_cache(maxsize=1)
@@ -180,35 +291,18 @@ def prepare_language_spans(
         return [LanguageSpan(text, fallback)]
 
     detector = get_detector()
-    detections = detect_spans(probe, detector)
+    detections = detect_spans(
+        probe,
+        detector,
+        fallback,
+        [(match.start(), match.end()) for match in CUSTOM_PHONEMES.finditer(text)],
+    )
     if not detections:
         raise ValueError("Cannot identify the language; specify an explicit lang_code.")
-    candidates = []
-    for detection in detections:
-        fragment = probe[detection.start_index : detection.end_index]
-        language = detection.language.iso_code_639_1.name.lower()
-        confidence = detector.compute_language_confidence_values(fragment)
-        ambiguous = (
-            len(regex.findall(r"\p{L}", fragment)) <= 12
-            and len(confidence) > 1
-            and confidence[0].value - confidence[1].value < 0.15
-        )
-        candidates.append(None if ambiguous else language)
-
     spans = []
     start = 0
-    for index, language in enumerate(candidates):
-        if language is None:
-            neighbors = sorted(
-                (abs(other - index), other, candidate)
-                for other, candidate in enumerate(candidates)
-                if candidate is not None
-            )
-            language = (
-                neighbors[0][2]
-                if neighbors
-                else NATIVE_LANGUAGES[fallback][0].split("-")[0]
-            )
+    for index, detection in enumerate(detections):
+        language = detection.language.iso_code_639_1.name.lower()
         route = _native_route(
             language, fallback, phoneme_bridge and settings.phoneme_bridge
         )
@@ -242,7 +336,7 @@ def prepare_speech_segments(
         fallback = speaker[:1].lower()
         if fallback not in NATIVE_LANGUAGES:
             fallback = settings.default_voice_code or "a"
-            if fallback == "auto":
+            if fallback in {"auto", "multi"}:
                 fallback = "a"
         for span in prepare_language_spans(
             fragment, language, fallback, options, phoneme_bridge
