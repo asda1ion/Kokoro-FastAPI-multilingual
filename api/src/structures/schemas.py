@@ -211,7 +211,7 @@ class OpenAISpeechRequest(VoiceAliasesMixin):
     )
     lang_code: Optional[LangCode] = Field(
         default=None,
-        description="Native Kokoro code, ISO/locale alias, or auto for offline language detection. If omitted, uses the configured language or voice prefix.",
+        description="Native Kokoro code, ISO/locale alias, installed espeak:language route (experimental), or auto for offline detection. If omitted, uses the configured language or voice prefix.",
     )
     phoneme_bridge: bool = Field(
         default=True,

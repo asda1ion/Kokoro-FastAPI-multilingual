@@ -13,6 +13,15 @@
 .coverage
 .coveragerc
 
+# Orbit and native caches
+.orbit
+**/.orbit
+**/.venv
+**/.venv-mps
+**/.uv-cache
+**/.ruff_cache
+**/.hypothesis
+
 # Environment
 # .env
 .venv

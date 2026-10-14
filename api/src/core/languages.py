@@ -1,4 +1,4 @@
-"""Native Kokoro routes and their public language names."""
+"""Kokoro native aliases take priority over installed eSpeak routes."""
 
 import re
 
@@ -43,8 +43,6 @@ def canonical_language(value: str, *, allow_auto: bool = True) -> str:
         code = ALIASES.get(value.split("-")[0], value)
     if code in NATIVE_LANGUAGES or (allow_auto and code == "auto"):
         return code
-    raise ValueError(
-        f"Unsupported lang_code {value!r}; choose a native language "
-        f"({', '.join(NATIVE_LANGUAGES)}) or lang_code=auto. "
-        "Experimental phoneme bridge routes are not available."
-    )
+    from .espeak import espeak_language
+
+    return "espeak:" + espeak_language(value)

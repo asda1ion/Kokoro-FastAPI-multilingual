@@ -120,8 +120,14 @@ def test_cyrillic_is_detected_as_a_language_not_a_script_route(
     detector, language, bridge
 ):
     detector.detect_multiple_languages_of.return_value = [detection(language, 0, 20)]
-    with pytest.raises(ValueError, match="no native Kokoro route"):
-        prepare_language_spans("Это длинное предложение.", "auto", "a", RAW, bridge)
+    if bridge:
+        spans = prepare_language_spans(
+            "Это длинное предложение.", "auto", "a", RAW, bridge
+        )
+        assert spans[0].lang_code == "espeak:" + language.iso_code_639_1.name.lower()
+    else:
+        with pytest.raises(ValueError, match="disabled"):
+            prepare_language_spans("Это длинное предложение.", "auto", "a", RAW, bridge)
 
 
 def test_unknown_script_is_explicit_error(detector):
@@ -242,7 +248,7 @@ def speech_service(monkeypatch):
 
 
 @pytest.mark.parametrize("stream", [True, False])
-@pytest.mark.parametrize("bridge", [True, False])
+@pytest.mark.parametrize("bridge", [False])
 def test_unsupported_language_rejected_before_writer_or_dispatch(
     detector, speech_service, monkeypatch, stream, bridge
 ):
@@ -293,6 +299,9 @@ def test_native_route_survives_disabled_bridge(speech_service, monkeypatch):
 def test_captioned_route_rejects_unsupported_language_before_stream(
     detector, speech_service, monkeypatch
 ):
+    speech_service.prepare_bridge_segments.side_effect = ValueError(
+        "Unmapped eSpeak phoneme (U+2603)"
+    )
     dependency = development.get_tts_service
     monkeypatch.setattr(
         development, "get_tts_service", AsyncMock(return_value=speech_service)
@@ -324,7 +333,9 @@ def test_capabilities_separate_detection_from_native_speech():
     assert {route["lang_code"] for route in data["native"]} == set(NATIVE_LANGUAGES)
     assert "ru" in data["auto_detection"]["languages"]
     assert len(data["auto_detection"]["languages"]) == len(Language.all())
-    assert data["experimental"] == [] and data["phoneme_bridge"]["available"] is False
+    assert data["experimental"] and data["phoneme_bridge"]["available"] is True
+    assert "ru" in data["auto_detection"]["speech_languages"]
+    assert data["phoneme_bridge"]["mapping"]["version"] == "espeak-kokoro-ipa-v1"
 
 
 def test_non_english_numbers_and_unicode_remain_native(monkeypatch):
@@ -347,3 +358,15 @@ def test_non_english_numbers_and_unicode_remain_native(monkeypatch):
 
     asyncio.run(collect())
     assert seen == [("12 cafés, हिन्दी!", "f")]
+
+
+def test_russian_english_code_switching(detector):
+    text = "Привет, друзья. This is an English sentence."
+    boundary = text.index("This")
+    detector.detect_multiple_languages_of.return_value = [
+        detection(Language.RUSSIAN, 0, boundary),
+        detection(Language.ENGLISH, boundary, len(text)),
+    ]
+    spans = prepare_language_spans(text, "auto", "a", RAW)
+    assert [span.lang_code for span in spans] == ["espeak:ru", "a"]
+    assert "".join(span.text for span in spans) == text

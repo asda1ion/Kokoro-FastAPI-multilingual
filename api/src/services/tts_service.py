@@ -1,10 +1,13 @@
 """TTS service using model and voice managers."""
 
 import asyncio
+import hashlib
+import json
 import os
 import re
 import tempfile
 import time
+from dataclasses import replace
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -23,6 +26,7 @@ from ..structures.schemas import NormalizationOptions, clamp_rate
 from .audio import AudioNormalizer, AudioService
 from .streaming_audio_writer import StreamingAudioWriter
 from .text_processing.language_routing import SpeechSegment, prepare_speech_segments
+from .text_processing.phoneme_bridge import MAPPING_VERSION, prepare_chunks
 from .text_processing.text_processor import (
     check_pause_budget,
     smart_split,
@@ -48,10 +52,63 @@ class TTSService:
         service._voice_manager = await get_voice_manager()
         return service
 
+    async def prepare_bridge_segments(self, segments, normalization_options=None):
+        if not any(
+            segment.span.lang_code.startswith("espeak:")
+            and segment.bridge_chunks is None
+            for segment in segments
+        ):
+            return segments
+        options = normalization_options or NormalizationOptions()
+        async with self.model_manager.hold():
+            await self.model_manager.ensure_backend()
+            backend = self.model_manager.get_backend()
+            if not isinstance(backend, KokoroV1):
+                raise ValueError("The phoneme bridge requires the Kokoro V1 backend.")
+            vocab, limit = backend.phoneme_vocabulary, backend.phoneme_limit
+            prepared = []
+            for segment in segments:
+                if (
+                    segment.span.lang_code.startswith("espeak:")
+                    and segment.bridge_chunks is None
+                ):
+                    chunks = await asyncio.to_thread(
+                        prepare_chunks,
+                        segment.span.text,
+                        segment.span.lang_code,
+                        options,
+                        vocab,
+                        limit,
+                    )
+                    logger.info(
+                        "Prepared phoneme bridge route={} mapping={} vocab_sha256={} chunks={} limit={}",
+                        segment.span.lang_code,
+                        MAPPING_VERSION,
+                        hashlib.sha256(
+                            json.dumps(
+                                vocab, sort_keys=True, ensure_ascii=False
+                            ).encode()
+                        ).hexdigest(),
+                        len(chunks),
+                        limit,
+                    )
+                    segment = replace(segment, bridge_chunks=chunks)
+                prepared.append(segment)
+            return prepared
+
+    async def _generate_bridge(self, backend, phonemes, voice, speed, lang_code):
+        async with self.model_manager.hold():
+            async for audio in backend.generate_from_tokens(
+                phonemes, voice, speed=speed, lang_code=lang_code
+            ):
+                if settings.default_volume_multiplier != 1.0:
+                    audio *= settings.default_volume_multiplier
+                yield AudioChunk(audio)
+
     async def _process_chunk(
         self,
         chunk_text: str,
-        tokens: List[int],
+        tokens: List[int] | str,
         voice_name: str,
         voice_path: str,
         speed: float,
@@ -98,13 +155,19 @@ class TTSService:
                 if isinstance(backend, KokoroV1):
                     chunk_index = 0
                     # For Kokoro V1, pass text and voice info with lang_code
-                    async for chunk_data in self.model_manager.generate(
-                        chunk_text,
-                        (voice_name, voice_path),
-                        speed=speed,
-                        lang_code=lang_code,
-                        return_timestamps=return_timestamps,
-                    ):
+                    if lang_code and lang_code.startswith("espeak:"):
+                        generation = self._generate_bridge(
+                            backend, tokens, (voice_name, voice_path), speed, lang_code
+                        )
+                    else:
+                        generation = self.model_manager.generate(
+                            chunk_text,
+                            (voice_name, voice_path),
+                            speed=speed,
+                            lang_code=lang_code,
+                            return_timestamps=return_timestamps,
+                        )
+                    async for chunk_data in generation:
                         chunk_data.audio *= volume_multiplier
                         # For streaming, convert to bytes
                         if output_format:
@@ -171,6 +234,8 @@ class TTSService:
                         yield trimmed
             except Exception as e:
                 logger.error(f"Failed to process tokens: {str(e)}")
+                if lang_code and lang_code.startswith("espeak:"):
+                    raise
 
     async def _load_voice_from_path(self, path: str, weight: float):
         # Check if the path is None and raise a ValueError if it is not
@@ -307,6 +372,24 @@ class TTSService:
                 f"Using voice path '{voice_path}' with lang_code '{segment_lang}'"
             )
 
+            if segment.span.lang_code.startswith("espeak:"):
+                if segment.bridge_chunks is None:
+                    raise ValueError(
+                        "Bridge segments must be prepared before synthesis."
+                    )
+                for chunk in segment.bridge_chunks:
+                    await asyncio.sleep(0)
+                    yield (
+                        voice_name,
+                        voice_path,
+                        segment_lang,
+                        segment_rate,
+                        chunk.text,
+                        chunk.phonemes,
+                        chunk.pause,
+                    )
+                continue
+
             async for chunk_text, tokens, pause_duration_s in smart_split(
                 segment_text,
                 lang_code=segment_lang,
@@ -354,6 +437,9 @@ class TTSService:
                     allow_voice_tags,
                     phoneme_bridge,
                 )
+            prepared_segments = await self.prepare_bridge_segments(
+                prepared_segments, normalization_options
+            )
             await self.model_manager.ensure_backend()
 
             # Process text in chunks with smart splitting, handling voice and pause tags
@@ -473,7 +559,7 @@ class TTSService:
                                 yield chunk_data
                             else:
                                 logger.warning(
-                                    f"No audio generated for chunk: '{chunk_text[:100]}...'"
+                                    f"No audio generated for {len(chunk_text)} characters"
                                 )
 
                         chunk_index += 1  # Increment chunk index after processing text
@@ -487,9 +573,9 @@ class TTSService:
                                 entry["voice"] = voice_name
                             timings.append(entry)
                     except Exception as e:
-                        logger.error(
-                            f"Failed to process audio for chunk: '{chunk_text[:100]}...'. Error: {str(e)}"
-                        )
+                        logger.error(f"Failed to process audio chunk: {str(e)}")
+                        if pipeline_lang_code.startswith("espeak:"):
+                            raise
                         continue
 
             # Only finalize if we successfully processed at least one chunk

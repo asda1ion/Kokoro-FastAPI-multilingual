@@ -8,9 +8,11 @@ import regex
 from lingua import Language, LanguageDetectorBuilder
 from unicode_segmentation_rs import unicode_sentences
 
+from ...core import espeak
 from ...core.config import settings
 from ...core.languages import NATIVE_LANGUAGES, canonical_language
 from ...structures.schemas import NormalizationOptions
+from .phoneme_bridge import BridgeChunk, mapping_metadata
 from .text_processor import CUSTOM_PHONEMES, PAUSE_TAG_PATTERN, split_by_voice
 
 KNOWN_LETTERS = regex.compile(
@@ -32,6 +34,7 @@ class SpeechSegment:
     voice: str
     rate: float
     span: LanguageSpan
+    bridge_chunks: tuple[BridgeChunk, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,17 @@ def get_detector():
 
 
 def language_capabilities() -> dict:
+    inventory = espeak.installed_languages()
+    detector_languages = sorted(
+        language.iso_code_639_1.name.lower() for language in Language.all()
+    )
+    supported = []
+    for language in detector_languages:
+        try:
+            canonical_language(language, allow_auto=False)
+            supported.append(language)
+        except ValueError:
+            pass
     return {
         "protocol_version": 1,
         "native": [
@@ -89,12 +103,24 @@ def language_capabilities() -> dict:
         "auto_detection": {
             "engine": "lingua",
             "offline": True,
-            "languages": sorted(
-                language.iso_code_639_1.name.lower() for language in Language.all()
-            ),
+            "languages": detector_languages,
+            "speech_languages": supported,
         },
-        "experimental": [],
-        "phoneme_bridge": {"enabled": settings.phoneme_bridge, "available": False},
+        "experimental": [
+            {
+                "lang_code": "espeak:" + code,
+                "language": code,
+                "name": name,
+                "experimental": True,
+                "manual": True,
+            }
+            for code, name in sorted(inventory.items())
+        ],
+        "phoneme_bridge": {
+            "enabled": settings.phoneme_bridge,
+            "available": bool(inventory),
+            "mapping": mapping_metadata(),
+        },
     }
 
 
@@ -115,12 +141,18 @@ def _native_route(language: str, fallback: str, bridge: bool) -> str:
     if language == "en" and fallback == "b":
         return "b"
     try:
-        return canonical_language(language, allow_auto=False)
-    except ValueError:
-        state = "disabled" if not bridge else "not available"
+        route = canonical_language(language, allow_auto=False)
+        if route.startswith("espeak:") and not bridge:
+            raise ValueError(
+                "phoneme bridge is disabled; choose an explicit native lang_code."
+            )
+        return route
+    except ValueError as error:
+        if "disabled" in str(error):
+            raise
         raise ValueError(
-            f"Detected language {language!r} has no native Kokoro route; "
-            f"phoneme bridge is {state}. Choose an explicit native lang_code."
+            f"Detected language {language!r} has no installed speech route; "
+            "check /v1/audio/languages or choose an explicit native lang_code."
         ) from None
 
 
@@ -133,6 +165,10 @@ def prepare_language_spans(
 ) -> list[LanguageSpan]:
     code = canonical_language(lang_code)
     if code != "auto":
+        if code.startswith("espeak:") and not (
+            phoneme_bridge and settings.phoneme_bridge
+        ):
+            raise ValueError("phoneme bridge is disabled; choose a native lang_code.")
         return [LanguageSpan(text, code)]
     fallback = canonical_language(fallback, allow_auto=False)
     text = unicodedata.normalize("NFC", text)

@@ -251,6 +251,14 @@ async def create_captioned_speech(
             getattr(request, "phoneme_bridge", True),
         )
 
+        if any(
+            segment.span.lang_code.startswith("espeak:")
+            for segment in prepared_segments
+        ):
+            prepared_segments = await tts_service.prepare_bridge_segments(
+                prepared_segments, request.normalization_options
+            )
+
         # Set content type based on format
         content_type = {
             "mp3": "audio/mpeg",

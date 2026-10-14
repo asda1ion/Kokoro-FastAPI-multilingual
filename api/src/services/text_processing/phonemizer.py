@@ -18,6 +18,9 @@ class NativeBackend(PhonemizerBackend):
     def __init__(self, language: str):
         from kokoro import KPipeline
 
+        from ...core.espeak import initialize_espeak
+
+        initialize_espeak()
         self.pipeline = KPipeline(
             lang_code=language, model=False, repo_id=settings.model_repo_id
         )

@@ -180,6 +180,10 @@ class KokoroV1(BaseModelBackend):
             else:
                 self._model = self._model.cpu()
 
+            logger.info(
+                "Loaded Kokoro model device={}", next(self._model.parameters()).device
+            )
+
         except FileNotFoundError:
             raise
         except Exception as e:
@@ -203,6 +207,9 @@ class KokoroV1(BaseModelBackend):
 
         if lang_code not in self._pipelines:
             logger.info(f"Creating new pipeline for language code: {lang_code}")
+            from ..core.espeak import initialize_espeak
+
+            initialize_espeak()
             self._pipelines[lang_code] = KPipeline(
                 lang_code=lang_code,
                 repo_id=settings.model_repo_id,
@@ -210,6 +217,18 @@ class KokoroV1(BaseModelBackend):
                 device=self._device,
             )
         return self._pipelines[lang_code]
+
+    @property
+    def phoneme_vocabulary(self) -> dict[str, int]:
+        if self._model is None:
+            raise RuntimeError("Model not loaded")
+        return dict(self._model.vocab)
+
+    @property
+    def phoneme_limit(self) -> int:
+        if self._model is None:
+            raise RuntimeError("Model not loaded")
+        return min(settings.absolute_max_tokens, 510, self._model.context_length - 2)
 
     async def generate_from_tokens(
         self,
@@ -281,11 +300,18 @@ class KokoroV1(BaseModelBackend):
             else:  # voice name is default/fallback
                 pipeline_lang_code = voice_name[0].lower()
 
-            pipeline = self._get_pipeline(pipeline_lang_code)
+            if pipeline_lang_code.startswith("espeak:"):
+                if len(tokens) > self.phoneme_limit or any(
+                    char not in self.phoneme_vocabulary for char in tokens
+                ):
+                    raise ValueError(
+                        "Bridge phonemes do not fit the loaded model vocabulary/limit."
+                    )
+                pipeline = self._get_pipeline("a")
+            else:
+                pipeline = self._get_pipeline(pipeline_lang_code)
 
-            logger.debug(
-                f"Generating audio from tokens with lang_code '{pipeline_lang_code}': '{tokens[:100]}{'...' if len(tokens) > 100 else ''}'"
-            )
+            logger.debug(f"Generating {len(tokens)} phoneme tokens")
             for result in pipeline.generate_from_tokens(
                 tokens=tokens, voice=voice_path, speed=speed, model=self._model
             ):
@@ -384,7 +410,7 @@ class KokoroV1(BaseModelBackend):
             pipeline = self._get_pipeline(pipeline_lang_code)
 
             logger.debug(
-                f"Generating audio for text with lang_code '{pipeline_lang_code}': '{text[:100]}{'...' if len(text) > 100 else ''}'"
+                f"Generating audio for {len(text)} characters with lang_code {pipeline_lang_code!r}"
             )
             for result in pipeline(
                 text, voice=voice_path, speed=speed, model=self._model

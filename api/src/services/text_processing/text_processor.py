@@ -71,7 +71,7 @@ def process_text_chunk(
 
     total_time = time.time() - start_time
     logger.debug(
-        f"Total processing took {total_time * 1000:.2f}ms for chunk: '{text[:50]}{'...' if len(text) > 50 else ''}'"
+        f"Total processing took {total_time * 1000:.2f}ms for {len(text)} characters"
     )
 
     return tokens
@@ -360,7 +360,7 @@ async def smart_split(
             ):
                 chunk_count += 1
                 logger.info(
-                    f"Yielding chunk {chunk_count}: '{chunk_text[:50]}{'...' if len(chunk_text) > 50 else ''}' ({len(chunk_tokens)} tokens)"
+                    f"Yielding chunk {chunk_count}: {len(chunk_text)} characters ({len(chunk_tokens)} tokens)"
                 )
                 yield chunk_text, chunk_tokens, None
 

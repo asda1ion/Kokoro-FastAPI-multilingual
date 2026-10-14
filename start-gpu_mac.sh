@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Get project root directory
-PROJECT_ROOT=$(pwd)
+set -euo pipefail
+
+PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$PROJECT_ROOT"
 
 # Set other environment variables
 export USE_GPU=true
@@ -15,6 +17,11 @@ export DEVICE_TYPE=mps
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 
 # Run FastAPI with GPU extras using uv run
-uv pip install -e .
+if [ ! -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+    uv sync --extra cpu
+fi
+# Install new core requirements without removing existing extras.
+uv pip install --python "$PROJECT_ROOT/.venv/bin/python" -e .
+uv run --no-sync python -c 'from api.src.core.espeak import installed_languages; assert installed_languages(), "Bundled eSpeak library/data unavailable"'
 uv run --no-sync python docker/scripts/download_model.py --output api/src/models/v1_0
-uv run --no-sync uvicorn api.src.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8880}"
+exec uv run --no-sync uvicorn api.src.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8880}"
