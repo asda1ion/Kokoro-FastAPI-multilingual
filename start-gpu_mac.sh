@@ -23,5 +23,6 @@ fi
 # Install new core requirements without removing existing extras.
 uv pip install --python "$PROJECT_ROOT/.venv/bin/python" -e .
 uv run --no-sync python -c 'from api.src.core.espeak import installed_languages; assert installed_languages(), "Bundled eSpeak library/data unavailable"'
+uv run --no-sync python -m api.src.core.japanese
 uv run --no-sync python docker/scripts/download_model.py --output api/src/models/v1_0
 exec uv run --no-sync uvicorn api.src.main:app --host "${HOST:-0.0.0.0}" --port "${PORT:-8880}"

@@ -28,6 +28,12 @@ from api.src.services.text_processing.phoneme_bridge import (
 from api.src.structures.schemas import NormalizationOptions
 
 CORPUS = [
+    ("native_japanese", "j", "こんにちは。これは日本語の音声テストです。"),
+    (
+        "mixed_japanese_english_russian",
+        "multi",
+        "日本語の音声テストです。 This is an English speech test. Привет, это проверка русской речи.",
+    ),
     ("russian", "ru", "Привет, мир. Это проверка русской речи."),
     (
         "mixed",
@@ -41,6 +47,14 @@ CORPUS = [
     ("native_english", "a", "This is a bounded native English speech sample."),
     ("native_french", "f", "Bonjour tout le monde. Ceci est une phrase française."),
 ]
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def source_provenance(root):
@@ -81,7 +95,7 @@ def run(args):
         os.environ,
         HOST="127.0.0.1",
         PORT=str(port),
-        API_LOG_LEVEL="INFO",
+        API_LOG_LEVEL="DEBUG",
         MODEL_AUTO_UNLOAD_TIMEOUT_SECONDS="0",
     )
     config = json.loads((root / "api/src/models/v1_0/config.json").read_text())
@@ -125,6 +139,9 @@ def run(args):
             (root / "api/src/models/v1_0/config.json").read_bytes()
         ).hexdigest(),
         "voice": "af_bella",
+        "voice_sha256": hashlib.sha256(
+            (root / "api/src/voices/v1_0/af_bella.pt").read_bytes()
+        ).hexdigest(),
         "speed": 1.1,
         "samples": [],
         "limitations": [
@@ -143,8 +160,9 @@ def run(args):
                 env=env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
-            deadline = time.monotonic() + 900
+            deadline = time.monotonic() + 3600
             while True:
                 if server.poll() is not None:
                     raise RuntimeError(
@@ -157,9 +175,23 @@ def run(args):
                 except requests.RequestException:
                     pass
                 if time.monotonic() > deadline:
-                    raise TimeoutError("Native startup exceeded 900 seconds.")
+                    raise TimeoutError("Native startup exceeded 3600 seconds.")
                 time.sleep(1)
             capabilities = requests.get(base + "/v1/audio/languages", timeout=30).json()
+            import unidic
+            from fugashi import Tagger
+
+            dictionary = Path(unidic.DICDIR).resolve()
+            report["dictionary"] = {
+                "path": str(dictionary),
+                "version": (dictionary / "version").read_text().strip(),
+                "fugashi": Tagger().dictionary_info,
+                "files_sha256": {
+                    path.name: file_sha256(path)
+                    for path in sorted(dictionary.iterdir())
+                    if path.is_file()
+                },
+            }
             (output / "capabilities.json").write_text(
                 json.dumps(capabilities, indent=2, ensure_ascii=False)
             )
@@ -170,6 +202,7 @@ def run(args):
             report["manual_routes"] = len(capabilities["experimental"])
             options = NormalizationOptions(normalize=False)
             for name, language, text in CORPUS:
+                log_start = (output / "server.log").stat().st_size
                 segments = prepare_speech_segments(text, "af_bella", language, options)
                 routing = []
                 for segment in segments:
@@ -195,17 +228,18 @@ def run(args):
                         ]
                     routing.append(route)
                 started = time.perf_counter()
+                payload = {
+                    "input": text,
+                    "voice": "af_bella",
+                    "speed": 1.1,
+                    "lang_code": language,
+                    "stream": True,
+                    "response_format": "wav",
+                    "normalization_options": {"normalize": False},
+                }
                 response = requests.post(
                     base + "/v1/audio/speech",
-                    json={
-                        "input": text,
-                        "voice": "af_bella",
-                        "speed": 1.1,
-                        "lang_code": language,
-                        "stream": True,
-                        "response_format": "wav",
-                        "normalization_options": {"normalize": False},
-                    },
+                    json=payload,
                     stream=True,
                     timeout=180,
                 )
@@ -230,16 +264,54 @@ def run(args):
                     raise RuntimeError(f"Invalid or empty speech sample: {name}")
                 (output / f"{name}.wav").write_bytes(data)
                 pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+                pcm_source = "decoded_wav"
+                if name in ("native_japanese", "mixed_japanese_english_russian"):
+                    response = requests.post(
+                        base + "/v1/audio/speech",
+                        json=dict(payload, response_format="pcm"),
+                        stream=True,
+                        timeout=180,
+                    )
+                    response.raise_for_status()
+                    pieces = []
+                    for piece in response.iter_content(4096):
+                        pieces.append(piece)
+                        if sum(map(len, pieces)) > 2_000_000:
+                            raise RuntimeError("Bounded PCM sample exceeded 2 MB.")
+                    pcm = b"".join(pieces)
+                    if len(pcm) % 2 or len(pcm) < 480:
+                        raise RuntimeError(f"Invalid or empty PCM stream: {name}")
+                    if not np.any(np.frombuffer(pcm, dtype="<i2")):
+                        raise RuntimeError(f"Silent PCM stream: {name}")
+                    pcm_source = "http_pcm_stream"
                 (output / f"{name}.pcm").write_bytes(pcm)
                 duration = len(audio) / rate
+                live_sample_log = (
+                    (output / "server.log").read_bytes()[log_start:].decode()
+                )
+                voice_paths = re.findall(
+                    r"Using single voice path: (.+)", live_sample_log
+                )
+                voice_preserved = bool(voice_paths) and all(
+                    Path(path.strip()).name == "af_bella.pt" for path in voice_paths
+                )
+                if not voice_preserved:
+                    raise RuntimeError(f"Selected voice evidence absent: {name}")
                 report["samples"].append(
                     {
                         "name": name,
                         "lang_code": language,
+                        "selected_voice": "af_bella",
+                        "selected_voice_verified_in_server_log": voice_preserved,
+                        "live_voice_paths": voice_paths,
                         "input": text,
                         "routing": routing,
                         "wav": f"{name}.wav",
                         "pcm": f"{name}.pcm",
+                        "pcm_source": pcm_source,
+                        "pcm_bytes": len(pcm),
+                        "pcm_frames": len(pcm) // 2,
+                        "pcm_sha256": hashlib.sha256(pcm).hexdigest(),
                         "bytes": len(data),
                         "frames": len(audio),
                         "sample_rate": rate,
@@ -273,16 +345,29 @@ def run(args):
         raise
     finally:
         if server is not None and server.poll() is None:
-            server.send_signal(signal.SIGINT)
+            os.killpg(server.pid, signal.SIGINT)
             try:
                 server.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                server.terminate()
+                os.killpg(server.pid, signal.SIGTERM)
                 server.wait(timeout=30)
         report["server_exit_code"] = server.returncode if server else None
+        with socket.socket() as probe:
+            report["owned_port_closed"] = probe.connect_ex(("127.0.0.1", port)) != 0
+        report["clean_owned_shutdown"] = (
+            server is not None
+            and server.returncode == 0
+            and report["owned_port_closed"]
+            and "Application shutdown complete." in (output / "server.log").read_text()
+        )
+        if report.get("status") == "passed" and not report["clean_owned_shutdown"]:
+            report["status"] = "failed"
+            report["error"] = "Owned server did not shut down cleanly."
         (output / "report.json").write_text(
             json.dumps(report, indent=2, ensure_ascii=False)
         )
+    if report["status"] != "passed":
+        raise RuntimeError(report["error"])
     print(
         json.dumps(
             {

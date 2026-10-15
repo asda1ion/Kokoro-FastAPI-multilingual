@@ -26,7 +26,7 @@ Omitting `lang_code` retains the existing configured language (`DEFAULT_VOICE_CO
 | `j` | `ja` | Japanese Misaki |
 | `z` | `zh`, `zh-CN`, `zh-TW`, `zh-Hans`, `zh-Hant` | Mandarin Chinese Misaki |
 
-Aliases are case-insensitive and accept underscores in place of hyphens. Japanese still requires the full UniDic dictionary installed by the Docker images. A native route describes the model's pronunciation support, not which dictionaries are installed on a particular local host.
+Aliases are case-insensitive and accept underscores in place of hyphens. Japanese requires the full UniDic dictionary installed by the Docker images or the native Mac launcher. A native route describes the model's pronunciation support, not which dictionaries are installed on a particular local host.
 
 Regional tags such as `es-ES`, `hi-IN`, `it-IT` and `ja-JP` resolve to the primary native language route. They do not add regional accents beyond the registered native pipelines.
 
@@ -77,3 +77,9 @@ Every approximation, including articulation-mark simplification, is recorded by 
 For a bounded local MPS check, run `uv run --no-sync python -m examples.multilingual_bridge_smoke --launch --output .orbit/tmp/mps-smoke` **from the TTS repository root**. The harness starts `./start-gpu_mac.sh` with loopback HOST and an unused explicit PORT, collects synthetic WAV/PCM and routing/mapping/timing evidence, and waits for its own server to stop. It does not touch other listeners, Docker, microphones, speakers or paid providers. Existing native environments install new core requirements while retaining installed extras; fresh environments use the CPU PyTorch wheel with Apple MPS support.
 
 Deep macOS worktree paths can make the bundled eSpeak initializer fall back to an invalid build-time data path and exit the process. The server copies the bundled data into an owned temporary directory, cleans it at process exit, and explicitly restores wrapper paths after importing Misaki and before constructing native or bridge G2P. The exact failing path-length threshold is not established. This is an initialization/path issue, not evidence that the host lacks language data. No Homebrew install or shorter checkout is required.
+
+### Native Mac Japanese setup
+
+Run `HOST=127.0.0.1 PORT=8911 ./start-gpu_mac.sh` from the repository root, choosing an unused port. Before uvicorn starts, the launcher checks full UniDic files and Japanese token pronunciations in its own virtualenv. Fresh and existing environments with missing default data download full UniDic (a roughly 526 MB archive, requiring additional space for extraction); later launches verify and reuse it. Packages alone, including `unidic-lite`, are insufficient.
+
+Downloads are staged and checked before missing files are installed. Existing dictionary files, installed extras, model weights and voices are preserved. The check uses fugashi's supported `unidic.DICDIR` selection; it does not invent a `UNIDIC_DICDIR` environment override. An explicitly configured dictionary must already be usable. Existing corrupt files or an invalid explicit dictionary stop startup with an error rather than being overwritten. Repair that data and rerun the launcher; a download or verification failure never starts the server. The standalone check is `uv run --no-sync python -m api.src.core.japanese`.
