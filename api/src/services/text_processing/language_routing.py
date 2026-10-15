@@ -118,6 +118,12 @@ def _confident(scores) -> bool:
     return len(scores) == 1 or scores[0].value - scores[1].value >= 0.15
 
 
+def _word_confident(word: str, scores) -> bool:
+    return _confident(scores) and (
+        len(regex.findall(r"\p{L}", word)) > 5 or scores[0].value >= 0.5
+    )
+
+
 def detect_spans(
     text: str, detector, fallback: str, protected=()
 ) -> list[DetectedSpan]:
@@ -148,9 +154,13 @@ def detect_spans(
             word_index += 1
         sentence_words = words[begin:word_index]
         candidates = [scores(word[2]) for word in sentence_words]
+        confident = [
+            _word_confident(word[2], values)
+            for word, values in zip(sentence_words, candidates)
+        ]
         anchors = {}
         for index, values in enumerate(candidates):
-            if _confident(values):
+            if confident[index]:
                 anchors.setdefault(values[0].language, []).append(index)
         contexts = {}
         for _, group in groupby(enumerate(sentence_words), key=lambda item: item[1][3]):
@@ -159,7 +169,7 @@ def detect_spans(
             contexts.update((index, bounds) for index, _ in run)
         for index, (word, values) in enumerate(zip(sentence_words, candidates)):
             language = values[0].language
-            if not _confident(values):
+            if not confident[index]:
                 compatible = {item.language for item in values}
                 neighbors = []
                 for candidate in compatible:
@@ -288,6 +298,16 @@ def prepare_language_spans(
     if any(not KNOWN_LETTERS.fullmatch(letter) for letter in letters):
         raise ValueError("Cannot identify this script; specify an explicit lang_code.")
     if not letters:
+        custom = any(
+            match[0][match[0].index("(/") + 2 : -2].strip()
+            for match in CUSTOM_PHONEMES.finditer(text)
+        )
+        pause = any(float(match[1]) > 0 for match in PAUSE_TAG_PATTERN.finditer(text))
+        if not (regex.search(r"\p{N}", probe) or custom or pause):
+            raise ValueError(
+                "Input contains no speakable text; add words, numbers, "
+                "custom phonemes or a pause."
+            )
         return [LanguageSpan(text, fallback)]
 
     detector = get_detector()

@@ -10,6 +10,8 @@ Per-PR attribution and contributor credits are published automatically on the co
 - `/v1/audio/speech` accepts `lang_code: "auto"` for offline multilingual pronunciation with one selected voice, plus native ISO and locale aliases. Unsupported languages fail before streaming starts.
 - `/v1/audio/languages` reports versioned native speech routes and automatic language detection coverage. `PHONEME_BRIDGE` and per-request `phoneme_bridge` can disable experimental pronunciation routes.
 ### Fixed
+- Automatic speech rejects emoji-only and symbol-only input before opening an empty audio stream; numbers, custom phonemes and pauses remain supported.
+- Automatic speech avoids weak short-word language anchors in English punctuation/emoji text while retaining per-word language switches. Experimental Russian speech approximates `ʑ` and nonsyllabic `ɪ^` with model-validated pronunciation and reports mapping version 2.
 - The native Mac launcher installs and verifies the full Japanese UniDic dictionary before serving, reuses working data, and stops on dictionary setup errors.
 - The web player's Multilingual mode sends an explicit language request and detects switches between individual words, so all text and words are phonemized. 'auto' is an alias.
 - Non-English sentence and oversized-clause processing uses the requested language's native pronunciation pipeline instead of English.

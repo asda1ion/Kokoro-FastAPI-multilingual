@@ -332,7 +332,7 @@ def test_capabilities_separate_detection_from_native_speech():
     assert len(data["auto_detection"]["languages"]) == len(Language.all())
     assert data["experimental"] and data["phoneme_bridge"]["available"] is True
     assert "ru" in data["auto_detection"]["speech_languages"]
-    assert data["phoneme_bridge"]["mapping"]["version"] == "espeak-kokoro-ipa-v1"
+    assert data["phoneme_bridge"]["mapping"]["version"] == "espeak-kokoro-ipa-v2"
 
 
 def test_non_english_numbers_and_unicode_remain_native(monkeypatch):
@@ -461,3 +461,112 @@ def test_multi_preserves_custom_ipa_numbers_and_normalized_text():
     assert "".join(span.text for span in spans) == text.replace("cafe\u0301s", "cafés")
     assert any("[two people](/həlˈoʊ/)" in span.text for span in spans)
     assert spans[0].lang_code == "espeak:ru"
+
+
+def test_weak_short_word_does_not_anchor_neighbors(detector):
+    english = [confidence(Language.ENGLISH, 0.51), confidence(Language.TAGALOG, 0.49)]
+    detector.compute_language_confidence_values.side_effect = lambda word: {
+        "people": [
+            confidence(Language.ENGLISH, 0.7),
+            confidence(Language.TAGALOG, 0.1),
+        ],
+        "okay": [
+            confidence(Language.TAGALOG, 0.23),
+            confidence(Language.ENGLISH, 0.07),
+        ],
+        "smile": english,
+    }[word]
+    spans = prepare_language_spans("people okay smile", "auto", "a", RAW)
+    assert [(span.text, span.lang_code) for span in spans] == [
+        ("people okay smile", "a")
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Hello?! (A small test...) Wait—yes: okay; smile 🙂, heart ❤️, rocket 🚀.",
+        "This is a complete English sentence.",
+    ],
+)
+def test_real_english_short_words_and_punctuation(text):
+    spans = prepare_language_spans(text, "auto", "a", RAW, phoneme_bridge=False)
+    assert [(span.text, span.lang_code) for span in spans] == [(text, "a")]
+
+
+def test_real_mixed_word_context_preserves_switching_and_bridge_gate():
+    text = "Hello друзья, please проверьте local звук, thank you спасибо."
+    spans = prepare_language_spans(text, "auto", "a", RAW)
+    assert [(span.text, span.lang_code) for span in spans] == [
+        ("Hello ", "a"),
+        ("друзья, ", "espeak:ru"),
+        ("please ", "a"),
+        ("проверьте ", "espeak:ru"),
+        ("local ", "a"),
+        ("звук, ", "espeak:ru"),
+        ("thank you ", "a"),
+        ("спасибо.", "espeak:ru"),
+    ]
+    with pytest.raises(ValueError, match="disabled"):
+        prepare_language_spans(text, "auto", "a", RAW, phoneme_bridge=False)
+
+
+@pytest.mark.parametrize(
+    "text", ["Magandang umaga sa inyong lahat.", "Magandang okay people"]
+)
+def test_real_unsupported_language_still_refuses(text, monkeypatch):
+    inventory = language_routing.espeak.installed_languages()
+    monkeypatch.setattr(
+        language_routing.espeak,
+        "installed_languages",
+        lambda: {code: name for code, name in inventory.items() if code != "tl"},
+    )
+    with pytest.raises(ValueError, match="'tl'.*no installed speech route"):
+        prepare_language_spans(text, "auto", "a", RAW)
+
+
+@pytest.mark.parametrize("language", ["auto", "multi"])
+@pytest.mark.parametrize("remove_emoji", [False, True])
+def test_symbols_have_no_automatic_speech_route(language, remove_emoji, detector):
+    with pytest.raises(ValueError, match="no speakable text"):
+        prepare_language_spans(
+            "🙂🚀✨", language, "a", NormalizationOptions(remove_emoji=remove_emoji)
+        )
+    detector.compute_language_confidence_values.assert_not_called()
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("output_format", ["pcm", "wav"])
+def test_symbols_refuse_before_audio_headers_or_dispatch(
+    speech_service, monkeypatch, stream, output_format
+):
+    writer = MagicMock()
+    monkeypatch.setattr(openai_compatible, "StreamingAudioWriter", writer)
+    response = TestClient(app).post(
+        "/v1/audio/speech",
+        json={
+            "input": "🙂🚀✨",
+            "voice": "af_bella",
+            "lang_code": "auto",
+            "response_format": output_format,
+            "stream": stream,
+        },
+    )
+    assert response.status_code == 400
+    assert "no speakable text" in response.json()["detail"]["message"]
+    assert response.headers["content-type"] == "application/json"
+    assert "content-disposition" not in response.headers
+    assert "x-download-path" not in response.headers
+    writer.assert_not_called()
+    speech_service.prepare_bridge_segments.assert_not_called()
+    speech_service.generate_audio.assert_not_called()
+    speech_service.generate_audio_stream.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "text", ["12?!", "[](/həlˈoʊ/)", "[pause:0.2s]", "🙂 [pause:0.2s]"]
+)
+def test_automatic_nonword_controls_still_prepare(text, detector):
+    spans = prepare_language_spans(text, "auto", "b", RAW)
+    assert [(span.text, span.lang_code) for span in spans] == [(text, "b")]
+    detector.compute_language_confidence_values.assert_not_called()

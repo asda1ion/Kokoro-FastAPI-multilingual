@@ -15,8 +15,9 @@ from .text_processor import CUSTOM_PHONEMES, PAUSE_TAG_PATTERN, join_lines, stri
 
 _PHONEMIZE_LOCK = Lock()
 
-MAPPING_VERSION = "espeak-kokoro-ipa-v1"
+MAPPING_VERSION = "espeak-kokoro-ipa-v2"
 SUBSTITUTIONS = {
+    "ɪ^": "ʲ",
     "d͡ʒ": "ʤ",
     "t͡ʃ": "ʧ",
     "d͡z": "ʣ",
@@ -31,6 +32,7 @@ SUBSTITUTIONS = {
     "ɬ": "l",
     "ɮ": "z",
     "ʐ": "ʒ",
+    "ʑ": "ʒ",
     "ɦ": "h",
     "ħ": "h",
     "ʕ": "ʔ",

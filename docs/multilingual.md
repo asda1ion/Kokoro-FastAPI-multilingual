@@ -34,9 +34,9 @@ On this macOS deployment, Misaki initializes the bundled eSpeak library and data
 
 Automatic detection uses all of Lingua's supported languages, including languages without native Kokoro speech support. `GET /v1/audio/languages` reports `protocol_version: 1`, `native` routes, `auto_detection.languages` (ISO 639-1 codes), installed `experimental` manual routes, and `phoneme_bridge` enabled/available flags. Detection coverage does not promise speech support. Bridged speech is always labeled experimental.
 
-Word scores with a top-two margin below 0.15 use the nearest confident, compatible word in the same Unicode sentence (earlier words win distance ties), then a confident same-script phrase, then the selected voice's language if it is a positive-scoring candidate. Without compatible context or voice, the highest-scoring language wins. Cyrillic words therefore never inherit English pronunciation: `Привет!` uses `espeak:ru`, and `Привет, people!` uses Russian then English. Script changes inside words are split, while contiguous Han/kana text stays together for native CJK pronunciation. Repeated word scores are reused within each request.
+Word scores with a top-two margin below 0.15, or words of five letters or fewer with a leading score below 0.5, use the nearest confident, compatible word in the same Unicode sentence (earlier words win distance ties), then a confident same-script phrase, then the selected voice's language if it is a positive-scoring candidate. Without compatible context or voice, the highest-scoring language wins. Cyrillic words therefore never inherit English pronunciation: `Привет!` uses `espeak:ru`, and `Привет, people!` uses Russian then English. Script changes inside words are split, while contiguous Han/kana text stays together for native CJK pronunciation. Repeated word scores are reused within each request.
 
-Detected English keeps British pronunciation when the fallback voice is British. Unicode is normalized to NFC without translation or letter removal. Custom phoneme units remain atomic. Cyrillic text goes through language detection rather than a script-to-Russian shortcut. Unknown scripts and unidentifiable text return an error suggesting an explicit `lang_code`. Shared words and very short text remain inherently ambiguous; explicit languages bypass those choices.
+Detected English keeps British pronunciation when the fallback voice is British. Unicode is normalized to NFC without translation or letter removal. Custom phoneme units remain atomic. Cyrillic text goes through language detection rather than a script-to-Russian shortcut. Unknown scripts and unidentifiable text return an error suggesting an explicit `lang_code`. Automatic input containing only emoji, punctuation or symbols refuses before audio headers with an actionable HTTP 400. Numbers, nonempty custom IPA and positive pause tags still prepare, and punctuation and emoji within text are retained according to normalization options. Shared words and very short text remain inherently ambiguous; explicit languages bypass those choices.
 
 All spans are checked before the speech response opens. A detected language without an installed pronunciation route returns HTTP 400. Unsupported explicit language codes return a request validation error. The experimental eSpeak bridge described below supplies non-native pronunciation; its kill switches preserve native multilingual routing.
 
@@ -54,7 +54,9 @@ Preparation uses eSpeak IPA with stress and punctuation, then checks every mappe
 
 `phoneme_bridge.mapping` publishes the mapping version, deterministic SHA-256 and target-vocabulary provenance. Ordinary bridge logs contain route, mapping version, vocabulary hash, chunk count and limit, without input text or IPA. Synthetic validation artifacts deliberately include the corpus and mappings for audit.
 
-### Mapping `espeak-kokoro-ipa-v1`
+### Mapping `espeak-kokoro-ipa-v2`
+
+Version 2 adds explicit `ʑ` to `ʒ` and `ɪ^` to `ʲ` approximations and changes the deterministic mapping hash. The loaded model must contain each replacement; otherwise preparation still refuses. A model that already contains `ʑ` retains it unchanged. eSpeak 1.52 emits `ɪ^` in Russian `проверьте`; its [Russian phoneme source](https://github.com/espeak-ng/espeak-ng/blob/1.52.0/phsource/ph_russian#L185-L196) defines this nonsyllabic “silent i” as palatalizing the preceding consonant. Only that complete sequence maps to the model’s palatalization marker; a bare `^` still refuses.
 
 The executable table is `api/src/services/text_processing/phoneme_bridge.py`. IPA symbols already present in the loaded vocabulary stay unchanged, including primary/secondary stress, length, nasalization and soft consonants (`ʲ`). When absent, soft consonants approximate with a following `j`, length can only survive when `ː` exists, and unknown symbols reject with sanitized Unicode code points and mapping-version guidance.
 
@@ -62,6 +64,8 @@ The executable table is `api/src/services/text_processing/phoneme_bridge.py`. IP
 |---|---|
 | Tied affricates `d͡ʒ`, `t͡ʃ`, `d͡z`, `t͡s` (also below tie) | `ʤ`, `ʧ`, `ʣ`, `ʦ` |
 | Latin `g`, dark/retroflex/lateral `ɫ ɭ ɬ ɮ`, retroflex `ʐ` | `ɡ`, `l l l z`, `ʒ` |
+| Alveolo-palatal `ʑ` (U+0291), observed in Russian `друзья` | `ʒ`; palatal articulation contrast lost |
+| Russian nonsyllabic `ɪ^`, observed in `проверьте` | `ʲ`; preceding-consonant palatalization approximation |
 | Breath/pharyngeal `ɦ ħ ʕ ʜ ʢ` | `h h ʔ h ʔ` |
 | Uvular/implosive `ɢ ɠ ɓ ɗ ʄ ʛ` | `ɡ ɡ b d ɟ ɡ` |
 | `ɺ ɱ ɧ ɞ ɘ ɵ ɶ ʉ ɿ ʅ` | `ɾ m x ə ə ø œ u ɨ ɨ` |

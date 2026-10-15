@@ -371,3 +371,54 @@ def test_source_chunks_prefer_word_boundaries():
 def test_unknown_dialect_rejected():
     with pytest.raises(ValueError, match="Unknown"):
         canonical_language("ru-vn-x-made-up")
+
+
+def test_observed_russian_alveolo_palatal_approximation(vocab):
+    ipa = bridge.phonemize("друзья", "espeak:ru")
+    assert "ʑ" in ipa and "ʑ" not in vocab and "ʒ" in vocab
+    mapped = bridge.map_ipa(ipa, vocab)
+    assert ("ʑ", "ʒ") in mapped.substitutions
+    assert "ʒ" in mapped.phonemes
+    assert set(mapped.phonemes) <= vocab.keys()
+    assert bridge.map_ipa("ʑ", {"ʑ": 1}).phonemes == "ʑ"
+    reduced = {key: value for key, value in vocab.items() if key != "ʒ"}
+    with pytest.raises(ValueError, match="U\\+0291"):
+        bridge.map_ipa(ipa, reduced)
+
+
+def test_observed_russian_silent_i_preserves_palatalization(vocab):
+    ipa = bridge.phonemize("проверьте", "espeak:ru")
+    assert "ɪ^" in ipa and "^" not in vocab and "ʲ" in vocab
+    mapped = bridge.map_ipa(ipa, vocab)
+    assert ("ɪ^", "ʲ") in mapped.substitutions
+    assert "rʲtʲ" in mapped.phonemes
+    assert set(mapped.phonemes) <= vocab.keys()
+    reduced = {key: value for key, value in vocab.items() if key != "ʲ"}
+    with pytest.raises(ValueError, match="U\\+026A U\\+005E"):
+        bridge.map_ipa("ɪ^", reduced)
+    with pytest.raises(ValueError, match="U\\+005E"):
+        bridge.map_ipa("^", vocab)
+
+
+def test_exact_mixed_corpus_prepares_every_bridge_span(vocab):
+    text = "Hello друзья, please проверьте local звук, thank you спасибо."
+    segments = prepare_speech_segments(text, "af_bella", "auto")
+    chunks = [
+        chunk
+        for segment in segments
+        if segment.span.lang_code.startswith("espeak:")
+        for chunk in bridge.prepare_chunks(
+            segment.span.text,
+            segment.span.lang_code,
+            NormalizationOptions(),
+            vocab,
+            450,
+        )
+    ]
+    assert len(chunks) == 4
+    assert all(
+        chunk.phonemes.strip() and set(chunk.phonemes) <= vocab.keys()
+        for chunk in chunks
+    )
+    substitutions = [item for chunk in chunks for item in chunk.substitutions]
+    assert ("ʑ", "ʒ") in substitutions and ("ɪ^", "ʲ") in substitutions

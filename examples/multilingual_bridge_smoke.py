@@ -20,7 +20,11 @@ import soundfile as sf
 import torch
 
 from api.src.inference.kokoro_v1 import KokoroV1
-from api.src.services.text_processing.language_routing import prepare_speech_segments
+from api.src.services.text_processing.language_routing import (
+    detect_spans,
+    get_detector,
+    prepare_speech_segments,
+)
 from api.src.services.text_processing.phoneme_bridge import (
     mapping_metadata,
     prepare_chunks,
@@ -28,6 +32,16 @@ from api.src.services.text_processing.phoneme_bridge import (
 from api.src.structures.schemas import NormalizationOptions
 
 CORPUS = [
+    (
+        "auto_mixed_words",
+        "auto",
+        "Hello друзья, please проверьте local звук, thank you спасибо.",
+    ),
+    (
+        "auto_english_punctuation",
+        "auto",
+        "Hello?! (A small test...) Wait—yes: okay; smile 🙂, heart ❤️, rocket 🚀.",
+    ),
     ("native_japanese", "j", "こんにちは。これは日本語の音声テストです。"),
     (
         "mixed_japanese_english_russian",
@@ -108,8 +122,9 @@ def run(args):
     vocab_hash = hashlib.sha256(
         json.dumps(vocab, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
-    from api.src.core.espeak import initialize_espeak
     from phonemizer.backend.espeak.wrapper import EspeakWrapper
+
+    from api.src.core.espeak import initialize_espeak
 
     initialize_espeak()
     espeak_version = EspeakWrapper().version
@@ -144,6 +159,7 @@ def run(args):
         ).hexdigest(),
         "speed": 1.1,
         "samples": [],
+        "refusals": [],
         "limitations": [
             "No intelligibility or WER claim; no listening/physical-device check.",
             "Experimental IPA approximations lose articulation and tone contrasts.",
@@ -202,6 +218,8 @@ def run(args):
             report["manual_routes"] = len(capabilities["experimental"])
             options = NormalizationOptions(normalize=False)
             for name, language, text in CORPUS:
+                if args.case and name not in args.case:
+                    continue
                 log_start = (output / "server.log").stat().st_size
                 segments = prepare_speech_segments(text, "af_bella", language, options)
                 routing = []
@@ -265,7 +283,12 @@ def run(args):
                 (output / f"{name}.wav").write_bytes(data)
                 pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
                 pcm_source = "decoded_wav"
-                if name in ("native_japanese", "mixed_japanese_english_russian"):
+                if name in (
+                    "native_japanese",
+                    "mixed_japanese_english_russian",
+                    "auto_mixed_words",
+                    "auto_english_punctuation",
+                ):
                     response = requests.post(
                         base + "/v1/audio/speech",
                         json=dict(payload, response_format="pcm"),
@@ -306,6 +329,17 @@ def run(args):
                         "live_voice_paths": voice_paths,
                         "input": text,
                         "routing": routing,
+                        "word_routes": [
+                            {
+                                "text": text[item.start_index : item.end_index],
+                                "start": item.start_index,
+                                "end": item.end_index,
+                                "language": item.language.iso_code_639_1.name.lower(),
+                            }
+                            for item in detect_spans(text, get_detector(), "a")
+                        ]
+                        if language in ("auto", "multi")
+                        else [],
                         "wav": f"{name}.wav",
                         "pcm": f"{name}.pcm",
                         "pcm_source": pcm_source,
@@ -325,6 +359,35 @@ def run(args):
                         "wav_sha256": hashlib.sha256(data).hexdigest(),
                     }
                 )
+            refusal_payload = {
+                "input": "🙂🚀✨",
+                "voice": "af_bella",
+                "lang_code": "auto",
+                "response_format": "pcm",
+                "stream": True,
+            }
+            response = requests.post(
+                base + "/v1/audio/speech", json=refusal_payload, timeout=30
+            )
+            if (
+                response.status_code not in (400, 422)
+                or response.headers.get("content-type") != "application/json"
+                or "content-disposition" in response.headers
+                or "x-download-path" in response.headers
+                or "no speakable text" not in response.text
+            ):
+                raise RuntimeError(
+                    "Symbol-only input did not refuse before audio headers."
+                )
+            report["refusals"].append(
+                {
+                    "payload": refusal_payload,
+                    "status": response.status_code,
+                    "headers": dict(response.headers),
+                    "body": response.json(),
+                    "pcm_bytes": 0,
+                }
+            )
             log.flush()
             server_log = (output / "server.log").read_text()
             if (
@@ -356,7 +419,7 @@ def run(args):
             report["owned_port_closed"] = probe.connect_ex(("127.0.0.1", port)) != 0
         report["clean_owned_shutdown"] = (
             server is not None
-            and server.returncode == 0
+            and server.returncode in (0, 130)
             and report["owned_port_closed"]
             and "Application shutdown complete." in (output / "server.log").read_text()
         )
@@ -383,5 +446,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--launch", action="store_true", required=True)
     parser.add_argument("--output", default=".orbit/tmp/mps-smoke")
+    parser.add_argument("--case", action="append", choices=[case[0] for case in CORPUS])
     parser.add_argument("--run-id", default=os.environ.get("ORBIT_RUN_ID", "manual"))
     run(parser.parse_args())
